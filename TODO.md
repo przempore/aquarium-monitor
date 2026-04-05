@@ -1,15 +1,18 @@
-# Transport-Agnostic Sensor Emulator Plan
+# Sensor Emulator Plan
 
-Goal: build the emulator so switching from TCP simulator to USB serial sensor requires no protocol reimplementation.
+Goal: build a reusable EZO-EC simulator crate with a stable protocol core and async simulator engine.
 
-## Target architectur
+Update: transport I/O loop for integration is handled outside this crate. This crate provides async behavior (commands + periodic responses) without owning network I/O.
+
+## Target architecture
 
 - One protocol core (`EzoEcCore`) with no Tokio/TCP/serial dependencies.
-- One generic async session loop over `AsyncRead + AsyncWrite`.
-- Thin transport adapters:
-  - TCP adapter for simulator mode.
-  - Serial adapter for real hardware mode.
-- Collector depends on a stable `Source` trait, not transport details.
+- One async simulator engine that:
+  - accepts commands asynchronously,
+  - emits periodic responses/events based on configured interval,
+  - keeps deterministic state transitions.
+- One standalone CLI mode using stdio (`stdin`/`stdout`) for local interaction.
+- This crate is simulator-only.
 
 ## Chapter 1: Isolate protocol core
 
@@ -27,60 +30,71 @@ Checkpoint:
 - Core has no Tokio types.
 - Unit tests pass for command behavior.
 
-## Chapter 2: Build generic session loop
+## Chapter 2: Expose crate API for host integration
 
-- Implement one async loop operating on generic stream type.
-- Signature idea:
-
-```rust
-async fn run_session<S>(stream: S, core: EzoEcCore) -> anyhow::Result<()>
-where
-    S: AsyncRead + AsyncWrite + Unpin,
-```
-
-- Centralize frame handling (`\r` and `\r\n` normalization).
-- Add integration-style test with `tokio::io::duplex`.
+- Keep protocol core synchronous and transport-agnostic.
+- Expose a minimal API that host crates can call directly:
+  - `handle_command(&mut self, cmd: &str) -> String`
+  - optional command normalization helper.
 
 Checkpoint:
 
-- Session logic works without TCP-specific code.
+- Host crate can call simulator API directly without transport dependencies.
 
-## Chapter 3: Add TCP adapter (simulator mode)
+## Chapter 3: Add async simulator engine (no transport)
 
-- Keep TCP code thin: bind/accept, then call `run_session`.
-- Start with per-connection state.
-- Keep behavior compatible with current manual checks.
-
-Checkpoint:
-
-- `nc`-based smoke tests work as expected.
-
-## Chapter 4: Add serial adapter (real sensor mode)
-
-- Add `tokio-serial` and open `/dev/ttyUSB*`.
-- Pass serial stream to `run_session`.
-- Do not duplicate protocol logic.
+- Build an internal async task/actor that owns `EzoEcCore` state.
+- Support async command requests while periodic emissions continue.
+- Use channels for host integration (for example: command requests in, emitted frames out).
 
 Checkpoint:
 
-- Same protocol behavior is exercised through serial path.
+- Host crate can send commands asynchronously and receive periodic outputs concurrently.
 
-## Chapter 5: Stable collector interface
+## Chapter 4: Expand protocol behavior
 
-- Define stable trait boundary for collector interactions.
-- Implement `TcpSource` and `SerialSource` behind same trait.
-- Make source selectable via configuration only.
+- Implement missing command semantics required by collector tests.
+- Keep responses deterministic and explicitly formatted.
+- Add negative-path handling for malformed commands.
 
 Checkpoint:
 
-- Collector can switch source without protocol code changes.
+- Protocol command tests cover expected and invalid paths.
+
+## Chapter 5: Add fixture-style tests for host crates
+
+- Add reusable command/response fixtures (table-driven tests).
+- Verify state transitions across command sequences.
+- Keep tests independent from network/async runtime.
+
+Checkpoint:
+
+- Host crates can rely on stable simulator behavior via fixtures.
+
+## Chapter 6: Collector integration contract
+
+- Document a stable command/response contract for collector usage.
+- Keep library API transport-free.
+
+Checkpoint:
+
+- Collector can use this simulator source without protocol-specific hacks.
+
+## Chapter 7: Standalone stdio CLI mode
+
+- Provide a binary entrypoint that reads commands from `stdin` and writes frames to `stdout`.
+- Reuse the same simulator engine/core (no protocol duplication).
+- Keep it single-instance and focused on local CLI workflows.
+
+Checkpoint:
+
+- Simulator can be run directly in terminal and controlled over stdio.
 
 ## Verification flow (after each chapter)
 
 1. `cargo check`
 2. `cargo test -p simulator-ezo-ec`
-3. Manual smoke checks (`nc` for TCP path)
-4. Regenerate `Cargo.nix` when dependencies change
+3. Regenerate `Cargo.nix` when dependencies change
 
 ## Defaults for now
 
