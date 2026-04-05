@@ -3,3 +3,6 @@ members = [
   "crates/simulator-ezo-ec",
 ]
 resolver = "2"
+
+[workspace.dependencies]
+anyhow = "1"

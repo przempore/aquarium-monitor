@@ -36,7 +36,7 @@
           let
             rustPkgs = pkgs.rustBuilder.makePackageSet {
               rustChannel = "nightly";
-              rustVersion = "2026-02-05";
+              rustVersion = "2026-04-04";
               packageFun = import ./Cargo.nix;
             };
           in rec 
