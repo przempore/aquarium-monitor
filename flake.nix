@@ -39,7 +39,7 @@
               rustVersion = "2026-04-04";
               packageFun = import ./Cargo.nix;
             };
-          in rec 
+          in rec
           {
             simulator = rustPkgs.workspace.simulator-ezo-ec { };
             default = simulator;
@@ -51,8 +51,9 @@
               modules = [
                 {
                   # https://devenv.sh/reference/options/
-                  packages =[
+                  packages = [
                     pkgs.nixd
+                    inputs.cargo2nix.packages.${pkgs.system}.default
                   ];
 
                   languages.rust = {
