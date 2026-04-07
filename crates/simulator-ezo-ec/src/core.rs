@@ -16,7 +16,7 @@ impl EzoEcCore {
         }
     }
 
-    pub fn handle_command(&mut self, cmd: &str) -> String {
+    pub fn run(&mut self, cmd: &str) -> String {
         match cmd {
             "i" | "info" => self.information_with_ok(),
             "C,?" => format!("?C,{}\n\r*OK\n\r", self.interval_seconds),
@@ -50,7 +50,7 @@ mod tests {
     #[test]
     fn command_i_returns_information() {
         let mut core = EzoEcCore::new();
-        let response = core.handle_command("i");
+        let response = core.run("i");
 
         assert_eq!(response, "?i,EZO-EC,2.16\n\r*OK\n\r");
     }
@@ -58,7 +58,7 @@ mod tests {
     #[test]
     fn command_status_returns_interval() {
         let mut core = EzoEcCore::new();
-        let response = core.handle_command("C,?");
+        let response = core.run("C,?");
 
         assert_eq!(response, "?C,1\n\r*OK\n\r");
     }
@@ -67,8 +67,8 @@ mod tests {
     fn command_set_interval_updates_interval() {
         let mut core = EzoEcCore::new();
 
-        let set_response = core.handle_command("C,42");
-        let status_response = core.handle_command("C,?");
+        let set_response = core.run("C,42");
+        let status_response = core.run("C,?");
 
         assert_eq!(set_response, "*OK\n\r");
         assert_eq!(status_response, "?C,42\n\r*OK\n\r");
@@ -77,7 +77,7 @@ mod tests {
     #[test]
     fn invalid_command_returns_error() {
         let mut core = EzoEcCore::new();
-        let response = core.handle_command("bad");
+        let response = core.run("bad");
 
         assert_eq!(response, "*ER\r");
     }

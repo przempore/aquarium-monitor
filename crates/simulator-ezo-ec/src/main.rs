@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use simulator_ezo_ec::normalize_command;
 use tokio::io::AsyncBufReadExt;
 use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
@@ -35,8 +36,8 @@ async fn handle_client(socket: TcpStream) -> Result<()> {
         if n == 0 {
             break;
         }
-        let cmd = line.trim_matches(|c| c == '\r' || c == '\n');
-        let response = core.handle_command(cmd);
+        let cmd = normalize_command(&line);
+        let response = core.run(&cmd);
 
         writer.write_all(response.as_bytes()).await?;
     }
