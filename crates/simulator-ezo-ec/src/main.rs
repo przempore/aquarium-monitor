@@ -1,45 +1,61 @@
 use anyhow::{Context, Result};
-use simulator_ezo_ec::normalize_command;
-use tokio::io::AsyncBufReadExt;
-use tokio::io::{AsyncWriteExt, BufReader};
-use tokio::net::{TcpListener, TcpStream};
-
-mod core;
-use crate::core::EzoEcCore;
+use simulator_ezo_ec::{CommandRequest, normalize_command, spawn_simulator};
+use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::sync::oneshot;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let listener = TcpListener::bind("127.0.0.1:5555")
-        .await
-        .context("failed to bind TCP listener on 127.0.0.1:5555")?;
-
-    loop {
-        let (socket, addr) = listener.accept().await.context("accept failed")?;
-        println!("New client connected: {addr}");
-
-        handle_client(socket)
-            .await
-            .with_context(|| format!("client session failed: {addr}"))?;
-    }
-}
-
-async fn handle_client(socket: TcpStream) -> Result<()> {
-    let (reader, mut writer) = socket.into_split();
-    let mut reader = BufReader::new(reader);
-
-    let mut core = EzoEcCore::new();
+    let mut stdin = BufReader::new(io::stdin());
+    let mut stdout = io::stdout();
+    let mut simulator = spawn_simulator();
     let mut line = String::new();
 
     loop {
-        line.clear();
-        let n = reader.read_line(&mut line).await?;
-        if n == 0 {
-            break;
-        }
-        let cmd = normalize_command(&line);
-        let response = core.run(&cmd);
+        tokio::select! {
+            read_result = stdin.read_line(&mut line) => {
+                let read_count = read_result.context("failed to read from stdin")?;
+                if read_count == 0 {
+                    break;
+                }
 
-        writer.write_all(response.as_bytes()).await?;
+                let command = normalize_command(&line);
+                line.clear();
+
+                if command.is_empty() {
+                    continue;
+                }
+
+                let (response_tx, response_rx) = oneshot::channel();
+                simulator
+                    .command_tx
+                    .send(CommandRequest {
+                        command,
+                        response_tx,
+                    })
+                    .await
+                    .context("simulator command channel closed")?;
+
+                let response = response_rx
+                    .await
+                    .context("simulator did not return command response")?;
+
+                stdout
+                    .write_all(response.as_bytes())
+                    .await
+                    .context("failed to write command response to stdout")?;
+                stdout.flush().await.context("failed to flush stdout")?;
+            }
+            Some(frame) = simulator.output_rx.recv() => {
+                stdout
+                    .write_all(frame.as_bytes())
+                    .await
+                    .context("failed to write periodic frame to stdout")?;
+                stdout.flush().await.context("failed to flush stdout")?;
+            }
+            else => {
+                break;
+            }
+        }
     }
 
     Ok(())
