@@ -168,7 +168,7 @@ Managed via `docker-compose`.
 ## Status
 
 - [x] Architecture defined
-- [ ] Sensor simulator (EZO-EC emulator)
+- [x] Sensor simulator (EZO-EC emulator)
 - [ ] Collector MVP
 - [ ] InfluxDB + Grafana integration
 - [ ] Rule-based alerting
