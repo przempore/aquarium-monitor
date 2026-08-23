@@ -1,8 +1,11 @@
 [workspace]
 members = [
   "crates/simulator-ezo-ec",
+  "crates/common",
+  "crates/collector",
 ]
 resolver = "2"
 
 [workspace.dependencies]
 anyhow = "1"
+time = { version = "0.3", features = ["formatting", "parsing"] }

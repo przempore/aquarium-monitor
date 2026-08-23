@@ -21,7 +21,7 @@ pub fn spawn_simulator() -> SimulatorHandle {
     spawn_simulator_with_capacity(DEFAULT_CHANNEL_CAPACITY)
 }
 
-pub fn spawn_simulator_with_capacity(channel_capacity: usize) -> SimulatorHandle {
+fn spawn_simulator_with_capacity(channel_capacity: usize) -> SimulatorHandle {
     let (command_tx, mut command_rx) = mpsc::channel::<CommandRequest>(channel_capacity);
     let (output_tx, output_rx) = mpsc::channel::<String>(channel_capacity);
 
