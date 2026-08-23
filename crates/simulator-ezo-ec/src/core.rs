@@ -1,6 +1,6 @@
 pub const DEFAULT_INTERVAL_SECONDS: u32 = 1;
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct EzoEcCore {
     name: &'static str,
     version: &'static str,
