@@ -1,11 +1,17 @@
-use common::{TelemetrySample, SourceId, Quality};
+use common::{Quality, SourceId, TelemetrySample};
 
-pub fn parse_ec_frame(
-    frame: &str,
-) -> Result<TelemetrySample, String> {
+pub fn parse_ec_frame(frame: &str) -> Result<TelemetrySample, String> {
+    let parts: Vec<&str> = frame.split(',').map(|f: &str| f.trim()).collect();
+    let [_, _, value] = parts.as_slice() else {
+        return Err(format!("Invalid frame format: {}", frame));
+    };
     Ok(TelemetrySample {
         timestamp: time::OffsetDateTime::now_utc(),
-        ec_us_cm: None,
+        ec_us_cm: Some(
+            value
+                .parse::<f32>()
+                .map_err(|e| format!("Failed to parse EC value: {}", e))?,
+        ),
         temp_c: None,
         source: SourceId::EzoEc,
         quality: Quality::Ok,
@@ -15,10 +21,12 @@ pub fn parse_ec_frame(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use parameterized::parameterized;
 
-    #[test]
-    fn test_parse_ec_frame() {
-        let frame = "some_ec_frame_data";
+    #[parameterized(frame = {
+        "?R,EC,450.00\n\r", "?R,EC,0.00", "?R,EC,132.40\n", "?R,EC,1000"
+    })]
+    fn test_valid_ec_frames(frame: &str) {
         let result = parse_ec_frame(frame);
         assert!(result.is_ok());
         let sample = result.unwrap();
