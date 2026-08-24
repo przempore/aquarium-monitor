@@ -2,7 +2,7 @@ use common::{Quality, SourceId, TelemetrySample};
 
 pub fn parse_ec_frame(frame: &str) -> Result<TelemetrySample, String> {
     let parts: Vec<&str> = frame.split(',').map(|f: &str| f.trim()).collect();
-    let [_, _, value] = parts.as_slice() else {
+    let [_response_type, _measurement_type, value] = parts.as_slice() else {
         return Err(format!("Invalid frame format: {}", frame));
     };
     Ok(TelemetrySample {
