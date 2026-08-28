@@ -1,0 +1,9 @@
+[package]
+name = "collector"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+time = { workspace = true }
+common = { path = "../common" }
+parameterized = { workspace = true }
