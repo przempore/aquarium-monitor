@@ -51,7 +51,7 @@
               modules = [
                 {
                   # https://devenv.sh/reference/options/
-                  packages =[
+                  packages = [
                     pkgs.nixd
                   ];
 

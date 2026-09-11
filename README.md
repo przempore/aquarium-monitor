@@ -168,8 +168,8 @@ Managed via `docker-compose`.
 ## Status
 
 - [x] Architecture defined
-- [ ] Sensor simulator (EZO-EC emulator)
-- [ ] Collector MVP
+- [x] Sensor simulator (EZO-EC emulator)
+- [x] Collector MVP (strict parser and synchronous one-shot source pipeline)
 - [ ] InfluxDB + Grafana integration
 - [ ] Rule-based alerting
 - [ ] Web UI (Dioxus)
