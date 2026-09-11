@@ -1,6 +1,7 @@
 use common::{Quality, SourceId, TelemetrySample};
 use std::error::Error;
 use std::fmt;
+use std::io::{self, BufRead, Write};
 use std::time::Duration;
 use time::OffsetDateTime;
 
@@ -40,6 +41,119 @@ pub trait Sink {
     type Error: Error + Send + Sync + 'static;
 
     fn write(&mut self, sample: TelemetrySample) -> Result<(), Self::Error>;
+}
+
+/// Reads complete EZO responses from a line-oriented stream.
+///
+/// EZO responses contain a measurement line followed by a status line. The
+/// status line is consumed as part of the same frame, while a following
+/// measurement is left buffered for the next call.
+pub struct StdinSource<R> {
+    reader: R,
+}
+
+impl<R: BufRead> StdinSource<R> {
+    pub fn new(reader: R) -> Self {
+        Self { reader }
+    }
+
+    /// Reads one frame, returning `None` when EOF is reached before any data.
+    pub fn read_frame_or_eof(&mut self) -> io::Result<Option<String>> {
+        let Some(mut measurement) = self.read_ezo_line()? else {
+            return Ok(None);
+        };
+
+        if self
+            .reader
+            .fill_buf()?
+            .first()
+            .is_some_and(|byte| *byte == b'*')
+        {
+            let status = self.read_ezo_line()?.unwrap_or_default();
+            measurement.push_str(&status);
+        }
+
+        Ok(Some(measurement))
+    }
+
+    fn read_ezo_line(&mut self) -> io::Result<Option<String>> {
+        let mut line = String::new();
+        if self.reader.read_line(&mut line)? == 0 {
+            return Ok(None);
+        }
+        if line.ends_with('\n') && self.reader.fill_buf()?.first() == Some(&b'\r') {
+            self.reader.consume(1);
+            line.push('\r');
+        }
+        Ok(Some(line))
+    }
+}
+
+impl<R: BufRead> Source for StdinSource<R> {
+    type Error = io::Error;
+
+    fn read_frame(&mut self) -> Result<String, Self::Error> {
+        self.read_frame_or_eof()?
+            .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "no more EZO-EC frames"))
+    }
+}
+
+/// Writes normalized samples as one JSON object per line.
+pub struct NdjsonSink<W> {
+    writer: W,
+}
+
+impl<W: Write> NdjsonSink<W> {
+    pub fn new(writer: W) -> Self {
+        Self { writer }
+    }
+
+    pub fn into_inner(self) -> W {
+        self.writer
+    }
+}
+
+impl<W: Write> Sink for NdjsonSink<W> {
+    type Error = io::Error;
+
+    fn write(&mut self, sample: TelemetrySample) -> Result<(), Self::Error> {
+        let encoded = serde_json::to_vec(&sample).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("serialize telemetry: {error}"),
+            )
+        })?;
+        self.writer
+            .write_all(&encoded)
+            .and_then(|_| self.writer.write_all(b"\n"))
+            .map_err(|error| io::Error::new(error.kind(), format!("write NDJSON sample: {error}")))
+    }
+}
+
+/// Collects all available frames from a buffered reader into an NDJSON writer.
+/// Malformed frames are reported to stderr with their raw contents and do not
+/// prevent subsequent frames from being collected.
+pub fn collect_reader<R: BufRead, W: Write>(reader: R, writer: W) -> io::Result<usize> {
+    let mut source = StdinSource::new(reader);
+    let mut sink = NdjsonSink::new(writer);
+    let mut successful_samples = 0;
+
+    while let Some(frame) = source.read_frame_or_eof()? {
+        match parse_ec_frame(&frame) {
+            Ok(sample) => {
+                sink.write(sample).map_err(|error| {
+                    io::Error::new(error.kind(), format!("collector sink failed: {error}"))
+                })?;
+                successful_samples += 1;
+            }
+            Err(error) => {
+                eprintln!("collector rejected raw frame {frame:?}: {error}");
+            }
+        }
+    }
+
+    sink.into_inner().flush()?;
+    Ok(successful_samples)
 }
 
 #[derive(Debug)]
@@ -249,6 +363,7 @@ pub fn parse_ec_frame(frame: &str) -> Result<TelemetrySample, ParseError> {
 mod tests {
     use super::*;
     use std::collections::VecDeque;
+    use std::io::Cursor;
 
     #[derive(Debug)]
     struct FakeSourceError;
@@ -345,6 +460,77 @@ mod tests {
         let mut source = FakeSource(Some(Ok("?R,EC,450.00\n\r*OK\n\r".to_owned())));
         let sample = collect_once(&mut source).expect("valid simulator response");
         assert_eq!(sample.ec_us_cm, Some(450.0));
+    }
+
+    #[test]
+    fn source_keeps_simulator_status_with_its_measurement() {
+        let input = Cursor::new(b"?R,EC,450.00\n\r*OK\n\r?R,EC,452.50\n\r*OK\n\r".to_vec());
+        let mut source = StdinSource::new(input);
+
+        assert_eq!(
+            source.read_frame_or_eof().expect("first frame"),
+            Some("?R,EC,450.00\n\r*OK\n\r".to_owned())
+        );
+        assert_eq!(
+            source.read_frame_or_eof().expect("second frame"),
+            Some("?R,EC,452.50\n\r*OK\n\r".to_owned())
+        );
+        assert_eq!(source.read_frame_or_eof().expect("EOF"), None);
+    }
+
+    #[test]
+    fn source_returns_final_frame_at_eof_without_status() {
+        let mut source = StdinSource::new(Cursor::new(b"?R,EC,450.00\n\r".to_vec()));
+
+        assert_eq!(
+            source.read_frame_or_eof().expect("final frame"),
+            Some("?R,EC,450.00\n\r".to_owned())
+        );
+        assert_eq!(source.read_frame_or_eof().expect("EOF"), None);
+    }
+
+    #[test]
+    fn ndjson_sink_writes_one_sample_per_line() {
+        let timestamp = OffsetDateTime::from_unix_timestamp(1_770_300_600).expect("timestamp");
+        let sample = TelemetrySample {
+            timestamp,
+            ec_us_cm: Some(450.0),
+            temp_c: None,
+            source: SourceId::EzoEc,
+            quality: Quality::Ok,
+        };
+        let mut sink = NdjsonSink::new(Vec::new());
+
+        sink.write(sample.clone()).expect("write sample");
+        let output = String::from_utf8(sink.into_inner()).expect("UTF-8 output");
+        assert_eq!(output.matches('\n').count(), 1);
+        let decoded =
+            serde_json::from_str::<TelemetrySample>(output.trim()).expect("decode sample");
+        assert_eq!(decoded, sample);
+    }
+
+    #[test]
+    fn malformed_input_does_not_hide_following_valid_frame() {
+        let input = Cursor::new(b"malformed\n\r?R,EC,450.00\n\r*OK\n\r".to_vec());
+        let mut output = Vec::new();
+
+        let count = collect_reader(input, &mut output).expect("collect frames");
+
+        assert_eq!(count, 1);
+        assert_eq!(output.iter().filter(|byte| **byte == b'\n').count(), 1);
+    }
+
+    #[test]
+    fn simulator_response_is_collected_as_normalized_ndjson() {
+        let mut simulator = simulator_ezo_ec::EzoEcCore::new();
+        let response = simulator.handle_command("R");
+        let mut output = Vec::new();
+
+        collect_reader(Cursor::new(response.into_bytes()), &mut output).expect("collect response");
+
+        let sample: TelemetrySample = serde_json::from_slice(&output).expect("NDJSON sample");
+        assert_eq!(sample.ec_us_cm, Some(450.0));
+        assert_eq!(sample.source, SourceId::EzoEc);
     }
 
     #[derive(Debug)]

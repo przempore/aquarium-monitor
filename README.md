@@ -169,7 +169,7 @@ Managed via `docker-compose`.
 
 - [x] Architecture defined
 - [x] Sensor simulator (EZO-EC emulator)
-- [x] Collector MVP (strict parser, synchronous polling, and source/sink pipeline)
+- [x] Collector MVP (polling, stdin framing, parsing, and NDJSON output)
 - [ ] InfluxDB + Grafana integration
 - [ ] Rule-based alerting
 - [ ] Web UI (Dioxus)
