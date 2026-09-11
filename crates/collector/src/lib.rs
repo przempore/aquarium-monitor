@@ -1,6 +1,7 @@
 use common::{Quality, SourceId, TelemetrySample};
 use std::error::Error;
 use std::fmt;
+use std::time::Duration;
 use time::OffsetDateTime;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,6 +35,13 @@ pub trait Source {
     fn read_frame(&mut self) -> Result<String, Self::Error>;
 }
 
+/// A synchronous destination for normalized telemetry.
+pub trait Sink {
+    type Error: Error + Send + Sync + 'static;
+
+    fn write(&mut self, sample: TelemetrySample) -> Result<(), Self::Error>;
+}
+
 #[derive(Debug)]
 pub enum CollectionError<E> {
     Source(E),
@@ -58,6 +66,131 @@ impl<E: Error + 'static> Error for CollectionError<E> {
             Self::Parse { error, .. } => Some(error),
         }
     }
+}
+
+/// A failure observed while polling. Source and parse failures are reported
+/// and polling continues; sink failures stop polling immediately.
+#[derive(Debug)]
+pub enum PollError<SourceError, SinkError> {
+    Source(SourceError),
+    Parse { frame: String, error: ParseError },
+    Sink(SinkError),
+}
+
+impl<SourceError: fmt::Display, SinkError: fmt::Display> fmt::Display
+    for PollError<SourceError, SinkError>
+{
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Source(error) => write!(formatter, "source error: {error}"),
+            Self::Parse { frame, error } => {
+                write!(formatter, "could not parse raw frame {frame:?}: {error}")
+            }
+            Self::Sink(error) => write!(formatter, "sink error: {error}"),
+        }
+    }
+}
+
+impl<SourceError: Error + 'static, SinkError: Error + 'static> Error
+    for PollError<SourceError, SinkError>
+{
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Source(error) => Some(error),
+            Self::Parse { error, .. } => Some(error),
+            Self::Sink(error) => Some(error),
+        }
+    }
+}
+
+impl<SourceError, SinkError> From<CollectionError<SourceError>>
+    for PollError<SourceError, SinkError>
+{
+    fn from(error: CollectionError<SourceError>) -> Self {
+        match error {
+            CollectionError::Source(error) => Self::Source(error),
+            CollectionError::Parse { frame, error } => Self::Parse { frame, error },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PollingConfig {
+    pub attempts: usize,
+    pub interval: Duration,
+}
+
+#[derive(Debug)]
+pub struct PollingReport<SourceError> {
+    pub successful_samples: usize,
+    pub failures: Vec<CollectionError<SourceError>>,
+}
+
+impl<SourceError> Default for PollingReport<SourceError> {
+    fn default() -> Self {
+        Self {
+            successful_samples: 0,
+            failures: Vec::new(),
+        }
+    }
+}
+
+pub type PollingResult<SourceError, SinkError> =
+    Result<PollingReport<SourceError>, PollError<SourceError, SinkError>>;
+
+/// Poll without sleeping. This is the deterministic, step-oriented API for
+/// callers that provide their own scheduling.
+pub fn poll_steps<S, K>(
+    source: &mut S,
+    sink: &mut K,
+    config: PollingConfig,
+) -> PollingResult<S::Error, K::Error>
+where
+    S: Source,
+    K: Sink,
+{
+    poll_with_sleep(source, sink, config, |_| {})
+}
+
+/// Poll with an injected sleep operation. The operation runs between attempts.
+pub fn poll_with_sleep<S, K, F>(
+    source: &mut S,
+    sink: &mut K,
+    config: PollingConfig,
+    mut sleep: F,
+) -> PollingResult<S::Error, K::Error>
+where
+    S: Source,
+    K: Sink,
+    F: FnMut(Duration),
+{
+    let mut report = PollingReport::default();
+    for attempt in 0..config.attempts {
+        match collect_once(source) {
+            Ok(sample) => {
+                sink.write(sample).map_err(PollError::Sink)?;
+                report.successful_samples += 1;
+            }
+            Err(error) => report.failures.push(error),
+        }
+        if attempt + 1 < config.attempts {
+            sleep(config.interval);
+        }
+    }
+    Ok(report)
+}
+
+/// Poll at wall-clock intervals using the standard synchronous sleeper.
+pub fn poll<S, K>(
+    source: &mut S,
+    sink: &mut K,
+    config: PollingConfig,
+) -> PollingResult<S::Error, K::Error>
+where
+    S: Source,
+    K: Sink,
+{
+    poll_with_sleep(source, sink, config, std::thread::sleep)
 }
 
 /// Read and normalize exactly one frame from a source.
@@ -115,6 +248,7 @@ pub fn parse_ec_frame(frame: &str) -> Result<TelemetrySample, ParseError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
 
     #[derive(Debug)]
     struct FakeSourceError;
@@ -211,5 +345,127 @@ mod tests {
         let mut source = FakeSource(Some(Ok("?R,EC,450.00\n\r*OK\n\r".to_owned())));
         let sample = collect_once(&mut source).expect("valid simulator response");
         assert_eq!(sample.ec_us_cm, Some(450.0));
+    }
+
+    #[derive(Debug)]
+    struct FakeSinkError;
+
+    impl fmt::Display for FakeSinkError {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("fake sink failed")
+        }
+    }
+
+    impl Error for FakeSinkError {}
+
+    struct SequenceSource(VecDeque<Result<String, FakeSourceError>>);
+
+    impl Source for SequenceSource {
+        type Error = FakeSourceError;
+
+        fn read_frame(&mut self) -> Result<String, Self::Error> {
+            self.0.pop_front().expect("unexpected source read")
+        }
+    }
+
+    struct RecordingSink {
+        samples: Vec<TelemetrySample>,
+        fail: bool,
+    }
+
+    impl Sink for RecordingSink {
+        type Error = FakeSinkError;
+
+        fn write(&mut self, sample: TelemetrySample) -> Result<(), Self::Error> {
+            if self.fail {
+                return Err(FakeSinkError);
+            }
+            self.samples.push(sample);
+            Ok(())
+        }
+    }
+
+    fn config(attempts: usize) -> PollingConfig {
+        PollingConfig {
+            attempts,
+            interval: Duration::from_millis(25),
+        }
+    }
+
+    #[test]
+    fn polls_multiple_samples_and_reports_the_success_count() {
+        let mut source = SequenceSource(VecDeque::from([
+            Ok("?R,EC,450.00".to_owned()),
+            Ok("?R,EC,452.50".to_owned()),
+        ]));
+        let mut sink = RecordingSink {
+            samples: Vec::new(),
+            fail: false,
+        };
+
+        let report = poll_steps(&mut source, &mut sink, config(2)).expect("polling succeeds");
+
+        assert_eq!(report.successful_samples, 2);
+        assert_eq!(report.failures.len(), 0);
+        assert_eq!(sink.samples.len(), 2);
+    }
+
+    #[test]
+    fn source_and_parse_failures_are_reported_and_polling_continues() {
+        let mut source = SequenceSource(VecDeque::from([
+            Err(FakeSourceError),
+            Ok("malformed".to_owned()),
+            Ok("?R,EC,450.00".to_owned()),
+        ]));
+        let mut sink = RecordingSink {
+            samples: Vec::new(),
+            fail: false,
+        };
+
+        let report = poll_steps(&mut source, &mut sink, config(3)).expect("polling succeeds");
+
+        assert_eq!(report.successful_samples, 1);
+        assert!(matches!(report.failures[0], CollectionError::Source(_)));
+        assert!(matches!(report.failures[1], CollectionError::Parse { .. }));
+        assert_eq!(sink.samples.len(), 1);
+    }
+
+    #[test]
+    fn sink_failure_is_returned_and_stops_polling() {
+        let mut source = SequenceSource(VecDeque::from([
+            Ok("?R,EC,450.00".to_owned()),
+            Ok("?R,EC,452.50".to_owned()),
+        ]));
+        let mut sink = RecordingSink {
+            samples: Vec::new(),
+            fail: true,
+        };
+
+        let error = poll_steps(&mut source, &mut sink, config(2)).expect_err("sink should fail");
+
+        assert!(matches!(error, PollError::Sink(_)));
+        assert!(sink.samples.is_empty());
+    }
+
+    #[test]
+    fn polling_honors_attempts_and_injected_intervals() {
+        let mut source = SequenceSource(VecDeque::from([
+            Ok("?R,EC,450.00".to_owned()),
+            Ok("?R,EC,452.50".to_owned()),
+            Ok("?R,EC,455.00".to_owned()),
+        ]));
+        let mut sink = RecordingSink {
+            samples: Vec::new(),
+            fail: false,
+        };
+        let mut sleeps = Vec::new();
+
+        let report = poll_with_sleep(&mut source, &mut sink, config(2), |duration| {
+            sleeps.push(duration)
+        })
+        .expect("polling succeeds");
+
+        assert_eq!(report.successful_samples, 2);
+        assert_eq!(sleeps, vec![Duration::from_millis(25)]);
     }
 }
