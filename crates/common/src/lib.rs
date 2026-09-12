@@ -1,5 +1,20 @@
 use serde::{Deserialize, Serialize};
+use std::error::Error;
 use time::OffsetDateTime;
+
+/// A synchronous source of complete raw sensor frames.
+pub trait Source {
+    type Error: Error + Send + Sync + 'static;
+
+    fn read_frame(&mut self) -> Result<String, Self::Error>;
+}
+
+/// A synchronous destination for normalized telemetry.
+pub trait Sink {
+    type Error: Error + Send + Sync + 'static;
+
+    fn write(&mut self, sample: TelemetrySample) -> Result<(), Self::Error>;
+}
 
 /// Normalized telemetry shared by sensor adapters and downstream consumers.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

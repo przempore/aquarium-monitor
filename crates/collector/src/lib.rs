@@ -29,19 +29,7 @@ impl fmt::Display for ParseError {
 
 impl Error for ParseError {}
 
-/// A synchronous source of complete raw sensor frames.
-pub trait Source {
-    type Error: Error + Send + Sync + 'static;
-
-    fn read_frame(&mut self) -> Result<String, Self::Error>;
-}
-
-/// A synchronous destination for normalized telemetry.
-pub trait Sink {
-    type Error: Error + Send + Sync + 'static;
-
-    fn write(&mut self, sample: TelemetrySample) -> Result<(), Self::Error>;
-}
+pub use common::{Sink, Source};
 
 /// Reads complete EZO responses from a line-oriented stream.
 ///
@@ -760,5 +748,41 @@ mod tests {
 
         assert_eq!(report.successful_samples, 2);
         assert_eq!(sleeps, vec![Duration::from_millis(25)]);
+    }
+
+    struct CommonSource(Option<String>);
+
+    impl common::Source for CommonSource {
+        type Error = FakeSourceError;
+
+        fn read_frame(&mut self) -> Result<String, Self::Error> {
+            self.0.take().ok_or(FakeSourceError)
+        }
+    }
+
+    struct CommonSink {
+        samples: Vec<TelemetrySample>,
+    }
+
+    impl common::Sink for CommonSink {
+        type Error = FakeSinkError;
+
+        fn write(&mut self, sample: TelemetrySample) -> Result<(), Self::Error> {
+            self.samples.push(sample);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn consumes_adapters_implemented_against_common_contracts() {
+        let mut source = CommonSource(Some("?R,EC,450.00".to_owned()));
+        let mut sink = CommonSink {
+            samples: Vec::new(),
+        };
+
+        let report = poll_steps(&mut source, &mut sink, config(1)).expect("polling succeeds");
+
+        assert_eq!(report.successful_samples, 1);
+        assert_eq!(sink.samples[0].ec_us_cm, Some(450.0));
     }
 }

@@ -15,6 +15,9 @@ replaceable sensor sources, and an optional UI.
 - Deterministic, stateful EZO-EC simulator with command handling and changing
   conductivity readings.
 - Synchronous `Source` and `Sink` traits for sensor input and normalized output.
+- Transport-neutral `Source` and `Sink` contracts now live in `common`; collector
+  re-exports them for its existing API while adapters can depend on `common`
+  without depending on collector.
 - Bounded polling with configurable attempts and interval, including
   deterministic injected scheduling for tests.
 - Stdin-to-NDJSON collector path: complete EZO frames are read from stdin,
@@ -89,6 +92,7 @@ then exits; it has no signal handling yet.
 
 ## Next recommended milestone
 
-Implement the long-lived polling boundary and a physical sensor source while
-keeping the synchronous, local-first pipeline. This is the next appropriate
-step before adding a normalized telemetry database or deployment integration.
+Implement a physical sensor source against the shared `common::Source` contract
+and connect it to the existing synchronous polling boundary. This is the next
+appropriate step before adding a normalized telemetry database or deployment
+integration.
