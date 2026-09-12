@@ -39,6 +39,8 @@ replaceable sensor sources, and an optional UI.
   `YES` CRC validation, millidegree conversion, typed parse/I/O errors, and
   injected-reader tests.
 - Combined EZO-EC plus DS18B20 normalization into one `TelemetrySample`.
+- Dependency-light synchronous InfluxDB 2.x line-protocol sink with an
+  injectable HTTP transport, HTTP-only standard-library client, and tests.
 
 ## Current data flow
 
@@ -70,7 +72,10 @@ collector has no signal handling yet.
 
 ## Explicit limitations
 
-- No InfluxDB storage or InfluxDB boundary.
+- The live InfluxDB sink is implemented but is not selected by the collector
+  CLI or NixOS service yet; stdout NDJSON remains unchanged.
+- InfluxDB transport currently supports local `http://` networking only. HTTPS
+  and TLS are intentionally deferred.
 - No physical hardware has been exercised; serial setup is delegated to
   `ExecStartPre` and currently supports only 9600 baud. DS18B20 integration is
   likewise untested against a physical sensor.
@@ -125,8 +130,17 @@ Module evaluation checks the generated device, interval, and `stty` command.
 The module is packaging and service plumbing only. Hardware access permissions
 must be configured by the host.
 
+## InfluxDB sink configuration
+
+`common::influxdb::InfluxDbConfig` requires explicit `url`, `organization`,
+`bucket`, and `token` values. The sink writes measurement
+`aquarium_telemetry` with `ec_us_cm` and optional `temp_c` fields, `source` and
+`quality` tags, and nanosecond timestamps (`precision=ns`). The current model
+has no tank identifier, so no tank tag is emitted. Tokens are redacted from
+configuration debug output and sink error display text.
+
 ## Next recommended milestone
 
 Exercise the serial path on target hardware and validate any additional baud
 rates before adding a normalized telemetry database or deployment.
-integration.
+integration and explicit sink selection in the collector service.

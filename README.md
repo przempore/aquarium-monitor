@@ -126,6 +126,22 @@ EOF.
 - Retention and downsampling handled natively
 - Queried by Grafana
 
+The synchronous InfluxDB 2.x sink is implemented in `common`, but is not yet
+selected by the collector CLI or NixOS service. Normalized stdout NDJSON is
+therefore unchanged. It requires explicit `url`, `organization`, `bucket`, and
+`token` configuration and writes:
+
+```text
+aquarium_telemetry source=hardware quality=ok ec_us_cm=450,temp_c=26.187 1770300600000000000
+```
+
+The timestamp is nanoseconds since Unix epoch and requests use
+`/api/v2/write?org=...&bucket=...&precision=ns`. Only `source` and `quality`
+tags are currently available from the domain model; there is no `tank` tag.
+The standard-library transport is intentionally restricted to local
+`http://` networking for now. HTTPS/TLS is not supported yet. Tokens are not
+included in displayed sink errors.
+
 InfluxDB is the **single source of truth** for measurements.
 
 ---
@@ -250,7 +266,8 @@ been tested yet.
 - [x] Linux serial transport, bounded polling API, and long-lived physical source mode
 - [x] DS18B20 Linux w1 parser/source, combined samples, and NixOS path configuration
 - [ ] Validate EZO-EC and DS18B20 integration on physical hardware
-- [ ] InfluxDB + Grafana integration
+- [x] InfluxDB 2.x sink implementation (not yet selected by NixOS service)
+- [ ] InfluxDB + Grafana live integration
 - [ ] Rule-based alerting
 - [ ] Web UI (Dioxus)
 - [ ] AI-assisted interpretation layer

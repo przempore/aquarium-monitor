@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::error::Error;
 use time::OffsetDateTime;
 
+pub mod influxdb;
+
 /// A synchronous source of complete raw sensor frames.
 pub trait Source {
     type Error: Error + Send + Sync + 'static;
