@@ -33,6 +33,8 @@ replaceable sensor sources, and an optional UI.
 - NixOS deployment module: the flake exports `nixosModules.default`, with the
   collector package exposed as `packages.collector`, a persistent raw log, and
   a hardened systemd service definition.
+- Transport-neutral EZO-EC request/response source implementing `common::Source`;
+  it sends `R\r`, flushes, and reads simulator-compatible framed responses.
 
 ## Current data flow
 
@@ -46,6 +48,9 @@ EZO-EC simulator or stdin
         -> stdout (one JSON object per line)
 ```
 
+The request/response source contract is implemented, but no `/dev/ttyUSB*`
+transport or configuration is wired yet.
+
 The current collector executable reads until EOF. It persists raw input when
 invoked with `--raw-log PATH`; normalized output remains on stdout. It does not
 yet run a long-lived polling service or persist normalized output to a database.
@@ -56,7 +61,8 @@ collector has no signal handling yet.
 ## Explicit limitations
 
 - No InfluxDB storage or InfluxDB boundary.
-- No physical sensor or UART/USB hardware source.
+- No physical sensor or UART/USB hardware transport/configuration; the
+  transport-neutral EZO-EC source is not connected to `/dev/ttyUSB*` yet.
 - The systemd module currently supplies `/dev/null` as stdin because there is
   no physical source yet. Since the collector exits on stdin EOF, enabling the
   service alone exits immediately and is not a production deployment.
@@ -108,7 +114,7 @@ long-lived stdin producer must be connected before enabling it in production.
 
 ## Next recommended milestone
 
-Implement a physical sensor source against the shared `common::Source` contract
-and connect it to the existing synchronous polling boundary. This is the next
+Add a Linux serial transport/configuration for the implemented EZO-EC source and
+connect it to the existing synchronous polling boundary. This is the next
 appropriate step before adding a normalized telemetry database or deployment
 integration.

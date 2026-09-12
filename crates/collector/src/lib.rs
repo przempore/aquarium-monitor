@@ -31,6 +31,77 @@ impl Error for ParseError {}
 
 pub use common::{Sink, Source};
 
+#[derive(Debug)]
+pub enum EzoEcSourceError {
+    Transport(io::Error),
+    Protocol(EzoEcProtocolError),
+}
+
+impl fmt::Display for EzoEcSourceError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Transport(error) => write!(formatter, "EZO-EC transport I/O failed: {error}"),
+            Self::Protocol(error) => write!(formatter, "EZO-EC protocol error: {error}"),
+        }
+    }
+}
+
+impl Error for EzoEcSourceError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Transport(error) => Some(error),
+            Self::Protocol(error) => Some(error),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EzoEcProtocolError {
+    UnexpectedEof,
+}
+
+impl fmt::Display for EzoEcProtocolError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnexpectedEof => formatter.write_str("EZO-EC response ended before a frame"),
+        }
+    }
+}
+
+impl Error for EzoEcProtocolError {}
+
+/// Sends read requests to an EZO-EC transport and reads complete responses.
+pub struct EzoEcSource<T> {
+    transport: T,
+}
+
+impl<T> EzoEcSource<T> {
+    pub fn new(transport: T) -> Self {
+        Self { transport }
+    }
+
+    pub fn into_inner(self) -> T {
+        self.transport
+    }
+}
+
+impl<T: BufRead + Write> Source for EzoEcSource<T> {
+    type Error = EzoEcSourceError;
+
+    fn read_frame(&mut self) -> Result<String, Self::Error> {
+        self.transport
+            .write_all(b"R\r")
+            .and_then(|_| self.transport.flush())
+            .map_err(EzoEcSourceError::Transport)?;
+
+        read_ezo_frame(&mut self.transport)
+            .map_err(EzoEcSourceError::Transport)?
+            .ok_or(EzoEcSourceError::Protocol(
+                EzoEcProtocolError::UnexpectedEof,
+            ))
+    }
+}
+
 /// Reads complete EZO responses from a line-oriented stream.
 ///
 /// EZO responses contain a measurement line followed by a status line. The
@@ -47,34 +118,33 @@ impl<R: BufRead> StdinSource<R> {
 
     /// Reads one frame, returning `None` when EOF is reached before any data.
     pub fn read_frame_or_eof(&mut self) -> io::Result<Option<String>> {
-        let Some(mut measurement) = self.read_ezo_line()? else {
-            return Ok(None);
-        };
+        read_ezo_frame(&mut self.reader)
+    }
+}
 
-        if self
-            .reader
-            .fill_buf()?
-            .first()
-            .is_some_and(|byte| *byte == b'*')
-        {
-            let status = self.read_ezo_line()?.unwrap_or_default();
-            measurement.push_str(&status);
-        }
+fn read_ezo_frame<R: BufRead>(reader: &mut R) -> io::Result<Option<String>> {
+    let Some(mut measurement) = read_ezo_line(reader)? else {
+        return Ok(None);
+    };
 
-        Ok(Some(measurement))
+    if reader.fill_buf()?.first().is_some_and(|byte| *byte == b'*') {
+        let status = read_ezo_line(reader)?.unwrap_or_default();
+        measurement.push_str(&status);
     }
 
-    fn read_ezo_line(&mut self) -> io::Result<Option<String>> {
-        let mut line = String::new();
-        if self.reader.read_line(&mut line)? == 0 {
-            return Ok(None);
-        }
-        if line.ends_with('\n') && self.reader.fill_buf()?.first() == Some(&b'\r') {
-            self.reader.consume(1);
-            line.push('\r');
-        }
-        Ok(Some(line))
+    Ok(Some(measurement))
+}
+
+fn read_ezo_line<R: BufRead>(reader: &mut R) -> io::Result<Option<String>> {
+    let mut line = String::new();
+    if reader.read_line(&mut line)? == 0 {
+        return Ok(None);
     }
+    if line.ends_with('\n') && reader.fill_buf()?.first() == Some(&b'\r') {
+        reader.consume(1);
+        line.push('\r');
+    }
+    Ok(Some(line))
 }
 
 impl<R: BufRead> Source for StdinSource<R> {
@@ -410,7 +480,66 @@ pub fn parse_ec_frame(frame: &str) -> Result<TelemetrySample, ParseError> {
 mod tests {
     use super::*;
     use std::collections::VecDeque;
-    use std::io::Cursor;
+    use std::io::{self, Cursor, Read};
+
+    struct MockTransport {
+        input: Cursor<Vec<u8>>,
+        writes: Vec<u8>,
+        fail_write: bool,
+        fail_read: bool,
+        fail_flush: bool,
+    }
+
+    impl MockTransport {
+        fn responding(response: &[u8]) -> Self {
+            Self {
+                input: Cursor::new(response.to_vec()),
+                writes: Vec::new(),
+                fail_write: false,
+                fail_read: false,
+                fail_flush: false,
+            }
+        }
+    }
+
+    impl Read for MockTransport {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            if self.fail_read {
+                return Err(io::Error::new(io::ErrorKind::BrokenPipe, "read failed"));
+            }
+            self.input.read(buffer)
+        }
+    }
+
+    impl BufRead for MockTransport {
+        fn fill_buf(&mut self) -> io::Result<&[u8]> {
+            if self.fail_read {
+                return Err(io::Error::new(io::ErrorKind::BrokenPipe, "read failed"));
+            }
+            self.input.fill_buf()
+        }
+
+        fn consume(&mut self, amount: usize) {
+            self.input.consume(amount);
+        }
+    }
+
+    impl Write for MockTransport {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if self.fail_write {
+                return Err(io::Error::new(io::ErrorKind::BrokenPipe, "write failed"));
+            }
+            self.writes.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            if self.fail_flush {
+                return Err(io::Error::new(io::ErrorKind::BrokenPipe, "flush failed"));
+            }
+            Ok(())
+        }
+    }
 
     #[derive(Debug)]
     struct FakeSourceError;
@@ -534,6 +663,71 @@ mod tests {
             Some("?R,EC,450.00\n\r".to_owned())
         );
         assert_eq!(source.read_frame_or_eof().expect("EOF"), None);
+    }
+
+    #[test]
+    fn ezo_source_sends_read_command_and_parses_simulator_response() {
+        let transport = MockTransport::responding(b"?R,EC,450.00\n\r*OK\n\r");
+        let mut source = EzoEcSource::new(transport);
+
+        assert_eq!(
+            source.read_frame().expect("response"),
+            "?R,EC,450.00\n\r*OK\n\r"
+        );
+        assert_eq!(source.into_inner().writes, b"R\r");
+    }
+
+    #[test]
+    fn ezo_source_reads_sequential_responses() {
+        let transport =
+            MockTransport::responding(b"?R,EC,450.00\n\r*OK\n\r?R,EC,452.50\n\r*OK\n\r");
+        let mut source = EzoEcSource::new(transport);
+
+        assert_eq!(
+            source.read_frame().expect("first response"),
+            "?R,EC,450.00\n\r*OK\n\r"
+        );
+        assert_eq!(
+            source.read_frame().expect("second response"),
+            "?R,EC,452.50\n\r*OK\n\r"
+        );
+        assert_eq!(source.into_inner().writes, b"R\rR\r");
+    }
+
+    #[test]
+    fn ezo_source_distinguishes_transport_failures() {
+        let mut write_failure = MockTransport::responding(b"");
+        write_failure.fail_write = true;
+        let mut source = EzoEcSource::new(write_failure);
+        assert!(matches!(
+            source.read_frame(),
+            Err(EzoEcSourceError::Transport(_))
+        ));
+
+        let mut read_failure = MockTransport::responding(b"");
+        read_failure.fail_read = true;
+        let mut source = EzoEcSource::new(read_failure);
+        assert!(matches!(
+            source.read_frame(),
+            Err(EzoEcSourceError::Transport(_))
+        ));
+    }
+
+    #[test]
+    fn ezo_source_reports_eof_as_protocol_condition() {
+        let mut source = EzoEcSource::new(MockTransport::responding(b""));
+
+        let error = source
+            .read_frame()
+            .expect_err("empty response should be EOF");
+        assert!(matches!(
+            error,
+            EzoEcSourceError::Protocol(EzoEcProtocolError::UnexpectedEof)
+        ));
+        assert_eq!(
+            error.to_string(),
+            "EZO-EC protocol error: EZO-EC response ended before a frame"
+        );
     }
 
     #[test]

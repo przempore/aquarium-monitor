@@ -67,6 +67,10 @@ Hardware planned for the initial build:
 
 Both are abstracted behind a common `Source` interface.
 
+The transport-neutral EZO-EC request/response source contract is implemented:
+it sends `R\r`, flushes the transport, and reads complete simulator-compatible
+responses. No `/dev/ttyUSB*` transport or configuration is wired yet.
+
 ---
 
 ### 2. Collector (Rust)
@@ -219,7 +223,8 @@ long-lived stdin producer is still required before production deployment.
 - [x] Local raw-frame NDJSON logging, including malformed frames, with
       `--raw-log PATH` collector configuration
 - [x] Continuous deterministic simulator mode with configurable interval
-- [ ] Long-lived polling and physical sensor source integration
+- [x] Transport-neutral EZO-EC request/response source contract
+- [ ] `/dev/ttyUSB*` transport/configuration and long-lived physical source integration
 - [ ] InfluxDB + Grafana integration
 - [ ] Rule-based alerting
 - [ ] Web UI (Dioxus)
