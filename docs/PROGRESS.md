@@ -20,20 +20,27 @@ replaceable sensor sources, and an optional UI.
 - Stdin-to-NDJSON collector path: complete EZO frames are read from stdin,
   normalized samples are written one per line to stdout, and malformed frames
   are reported without stopping later valid frames.
+- Local raw-frame NDJSON logging: every received frame is written with a UTC
+  timestamp and its exact raw contents before parsing, including malformed or
+  rejected frames.
+- Minimal collector configuration: `--raw-log PATH` selects an append-only
+  raw log while normalized NDJSON remains on stdout.
 
 ## Current data flow
 
 ```text
 EZO-EC simulator or stdin
         -> StdinSource
-        -> strict EZO-EC parser
+        +-> RawFrameLogger -> local raw NDJSON log
+        +-> strict EZO-EC parser
         -> TelemetrySample
         -> NdjsonSink
         -> stdout (one JSON object per line)
 ```
 
-The current collector executable reads until EOF. It does not yet run a
-long-lived polling service or persist output.
+The current collector executable reads until EOF. It persists raw input when
+invoked with `--raw-log PATH`; normalized output remains on stdout. It does not
+yet run a long-lived polling service or persist normalized output to a database.
 
 ## Explicit limitations
 
@@ -44,8 +51,8 @@ long-lived polling service or persist output.
 - No Grafana dashboards.
 - No UI.
 - No AI-assisted interpretation.
-- Raw frames are reported on stderr for rejected input, but are not yet
-  persisted to a local log.
+- Raw frames are persisted locally as NDJSON; rejected frames are also reported
+  on stderr.
 
 ## Verification
 
@@ -58,14 +65,14 @@ nix develop --impure -c cargo test --workspace
 Exercise the simulator-to-collector path:
 
 ```sh
-nix develop --impure -c sh -c 'printf "R\nR\n" | cargo run --quiet -p simulator-ezo-ec | cargo run --quiet -p collector'
+nix develop --impure --command sh -c 'printf "R\nR\n" | cargo run --quiet -p simulator-ezo-ec | cargo run --quiet -p collector -- --raw-log /tmp/aquarium-monitor-raw.ndjson'
 ```
 
-The second command emits two normalized NDJSON samples.
+The second command emits two normalized NDJSON samples and appends both raw
+frames to the local raw log.
 
 ## Next recommended milestone
 
-Implement configurable local raw-frame logging and collector configuration.
-This is the most appropriate next boundary because it adds durable,
-inspectable operation without introducing an external database before source,
-normalization, and error handling are exercised by a long-running process.
+Implement the long-lived polling boundary and a physical sensor source while
+keeping the synchronous, local-first pipeline. This is the next appropriate
+step before adding a normalized telemetry database or deployment integration.

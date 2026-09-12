@@ -3,7 +3,7 @@ use std::error::Error;
 use std::fmt;
 use std::io::{self, BufRead, Write};
 use std::time::Duration;
-use time::OffsetDateTime;
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParseError {
@@ -130,15 +130,73 @@ impl<W: Write> Sink for NdjsonSink<W> {
     }
 }
 
+#[derive(Debug, serde::Serialize)]
+pub struct RawFrameRecord<'a> {
+    pub timestamp: String,
+    pub raw_frame: &'a str,
+}
+
+/// Writes every received raw frame as an inspectable JSON object per line.
+pub struct RawFrameLogger<W> {
+    writer: W,
+}
+
+impl<W: Write> RawFrameLogger<W> {
+    pub fn new(writer: W) -> Self {
+        Self { writer }
+    }
+
+    pub fn write_frame(&mut self, raw_frame: &str) -> io::Result<()> {
+        let record = RawFrameRecord {
+            timestamp: OffsetDateTime::now_utc()
+                .format(&Rfc3339)
+                .map_err(|error| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("format raw frame timestamp: {error}"),
+                    )
+                })?,
+            raw_frame,
+        };
+        let encoded = serde_json::to_vec(&record).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("serialize raw frame: {error}"),
+            )
+        })?;
+        self.writer
+            .write_all(&encoded)
+            .and_then(|_| self.writer.write_all(b"\n"))
+            .and_then(|_| self.writer.flush())
+            .map_err(|error| io::Error::new(error.kind(), format!("write raw frame: {error}")))
+    }
+
+    pub fn into_inner(self) -> W {
+        self.writer
+    }
+}
+
 /// Collects all available frames from a buffered reader into an NDJSON writer.
 /// Malformed frames are reported to stderr with their raw contents and do not
 /// prevent subsequent frames from being collected.
 pub fn collect_reader<R: BufRead, W: Write>(reader: R, writer: W) -> io::Result<usize> {
+    collect_reader_with_raw_log(reader, writer, io::sink())
+}
+
+/// Collects frames while persisting every received frame before parsing it.
+/// Normalized telemetry and raw frames are written to separate destinations.
+pub fn collect_reader_with_raw_log<R: BufRead, W: Write, L: Write>(
+    reader: R,
+    writer: W,
+    raw_writer: L,
+) -> io::Result<usize> {
     let mut source = StdinSource::new(reader);
     let mut sink = NdjsonSink::new(writer);
+    let mut raw_logger = RawFrameLogger::new(raw_writer);
     let mut successful_samples = 0;
 
     while let Some(frame) = source.read_frame_or_eof()? {
+        raw_logger.write_frame(&frame)?;
         match parse_ec_frame(&frame) {
             Ok(sample) => {
                 sink.write(sample).map_err(|error| {
@@ -153,6 +211,7 @@ pub fn collect_reader<R: BufRead, W: Write>(reader: R, writer: W) -> io::Result<
     }
 
     sink.into_inner().flush()?;
+    raw_logger.into_inner().flush()?;
     Ok(successful_samples)
 }
 
@@ -518,6 +577,54 @@ mod tests {
 
         assert_eq!(count, 1);
         assert_eq!(output.iter().filter(|byte| **byte == b'\n').count(), 1);
+    }
+
+    #[test]
+    fn raw_log_contains_valid_and_malformed_frames_separately_from_normalized_output() {
+        let input = Cursor::new(b"malformed\n\r?R,EC,450.00\n\r*OK\n\r".to_vec());
+        let mut output = Vec::new();
+        let mut raw_log = Vec::new();
+
+        let count =
+            collect_reader_with_raw_log(input, &mut output, &mut raw_log).expect("collect frames");
+
+        assert_eq!(count, 1);
+        assert_eq!(output.iter().filter(|byte| **byte == b'\n').count(), 1);
+        let records: Vec<serde_json::Value> = raw_log
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_slice(line).expect("raw record"))
+            .collect();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0]["raw_frame"], "malformed\n\r");
+        assert_eq!(records[1]["raw_frame"], "?R,EC,450.00\n\r*OK\n\r");
+        assert!(records.iter().all(|record| record["timestamp"].is_string()));
+        assert!(serde_json::from_slice::<TelemetrySample>(&output).is_ok());
+    }
+
+    struct FailingWriter;
+
+    impl Write for FailingWriter {
+        fn write(&mut self, _buffer: &[u8]) -> io::Result<usize> {
+            Err(io::Error::other("raw log unavailable"))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn raw_log_write_errors_stop_collection() {
+        let input = Cursor::new(b"?R,EC,450.00\n\r".to_vec());
+        let mut output = Vec::new();
+
+        let error = collect_reader_with_raw_log(input, &mut output, FailingWriter)
+            .expect_err("raw logger should fail");
+
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert!(error.to_string().contains("write raw frame"));
+        assert!(output.is_empty());
     }
 
     #[test]

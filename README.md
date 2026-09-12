@@ -39,7 +39,7 @@ Hardware planned for the initial build:
 | - Normalizer (units)      |
 | - Rule engine (MVP)       |
 | - InfluxDB writer         |
-| - journald raw logging    |
+| - local raw-frame NDJSON  |
 +-------------+-------------+
               |
               | Line protocol (HTTP)
@@ -70,7 +70,8 @@ Both are abstracted behind a common `Source` interface.
 ---
 
 ### 2. Collector (Rust)
-Runs as a **systemd service** installed via Nix.
+The current collector is a synchronous stdin-to-stdout executable. A future
+deployment may run it as a systemd service installed via Nix.
 
 Responsibilities:
 - Poll sensor sources at a fixed interval
@@ -80,9 +81,19 @@ Responsibilities:
   - `temp_c`
 - Apply simple rule-based checks (spikes, drift, missing data)
 - Persist telemetry to InfluxDB
-- Log raw frames to `journald` for debugging/replay
+- Persist every received raw frame, including malformed frames, to a separate
+  local NDJSON log for debugging/replay
 
 Collector is intentionally **headless** and independent of any UI.
+
+For local operation, provide the raw log explicitly:
+
+```sh
+printf '?R,EC,450.00\n\r*OK\n\r' | cargo run -p collector -- --raw-log raw-frames.ndjson
+```
+
+Normalized telemetry is emitted on stdout; raw frames are appended to the
+configured file.
 
 ---
 
@@ -131,8 +142,10 @@ not by the UI being open.
 }
 ```
 
-Only normalized data is written to InfluxDB.
-Raw sensor frames are logged separately.
+Only normalized data is written to the normalized output. Raw sensor frames are
+logged separately as NDJSON records containing `timestamp` and `raw_frame`.
+The collector accepts the explicit configuration `--raw-log PATH`; normalized
+NDJSON remains on stdout.
 
 ---
 
@@ -169,7 +182,10 @@ Managed via `docker-compose`.
 
 - [x] Architecture defined
 - [x] Sensor simulator (EZO-EC emulator)
-- [x] Collector MVP (polling, stdin framing, parsing, and NDJSON output)
+- [x] Collector MVP (stdin framing, parsing, and NDJSON output)
+- [x] Local raw-frame NDJSON logging, including malformed frames, with
+      `--raw-log PATH` collector configuration
+- [ ] Long-lived polling and physical sensor source integration
 - [ ] InfluxDB + Grafana integration
 - [ ] Rule-based alerting
 - [ ] Web UI (Dioxus)
