@@ -42,6 +42,8 @@ replaceable sensor sources, and an optional UI.
 - Dependency-light synchronous InfluxDB 2.x line-protocol sink with an
   injectable HTTP transport, HTTP-only standard-library client, escaped tank
   tags, and tests.
+- Optional Grafana InfluxDB 2.x datasource provisioning from a Nix-generated
+  read-only file, with the token supplied by a runtime EnvironmentFile.
 
 ## Current data flow
 
@@ -81,6 +83,12 @@ collector has no signal handling yet.
 - No physical hardware or container deployment has been exercised; serial setup is delegated to
   `ExecStartPre` and currently supports only 9600 baud. DS18B20 integration is
   likewise untested against a physical sensor.
+- InfluxDB initialization requires a host-provided EnvironmentFile containing
+  `DOCKER_INFLUXDB_INIT_MODE`, `DOCKER_INFLUXDB_INIT_USERNAME`,
+  `DOCKER_INFLUXDB_INIT_PASSWORD`, `DOCKER_INFLUXDB_INIT_ORG`,
+  `DOCKER_INFLUXDB_INIT_BUCKET`, and `DOCKER_INFLUXDB_INIT_ADMIN_TOKEN`.
+  sops-nix should provide its runtime path; credentials must not be put in Nix
+  source or the Nix store.
 - The NixOS service requires `tankId` and `device`, uses `/dev/null` as stdin, and needs host
   udev/group policy to grant its `DynamicUser` access to the serial device.
 - No rules, alarms, or trend analysis.
@@ -151,7 +159,8 @@ Tokens are redacted from configuration debug output and sink error display text.
 
 ## NixOS deployment files
 
-The README example requires uncommitted InfluxDB environment and token files.
+The README example requires uncommitted InfluxDB initialization, collector
+token, and Grafana token EnvironmentFiles.
 Do not put credentials or generated container data in Nix source control. The
 default local ports are InfluxDB `127.0.0.1:8086` and Grafana `127.0.0.1:3000`;
 both containers are disabled unless explicitly enabled. Host validation remains
@@ -160,10 +169,13 @@ required for hardware, Podman, directory ownership, and image availability.
 ## Secret management
 
 The NixOS module accepts secret file paths so host configurations can use the
-existing `sops-nix` workflow. The module does not contain credentials and loads
-the collector token through a systemd credential.
+existing `sops-nix` workflow. The module does not contain credentials, loads
+the collector token through a systemd credential, and passes the Grafana token
+through `INFLUXDB_TOKEN` in its runtime EnvironmentFile. The generated Grafana
+provisioning file is mounted read-only and contains no token value.
 
 ## Next recommended milestone
 
-Exercise the serial path and OCI services on the target host, then validate
-Grafana dashboards and InfluxDB retention settings.
+Exercise the serial path and OCI services on the target host, then validate the
+provisioned Grafana datasource and InfluxDB retention settings. Dashboards are
+not provisioned yet.

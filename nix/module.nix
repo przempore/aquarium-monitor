@@ -3,6 +3,22 @@
 let
   cfg = config.services.aquarium-monitor;
   collectorService = "aquarium-monitor.service";
+  grafanaDatasourceProvisioning = pkgs.writeText "aquarium-monitor-grafana-datasource.yml" ''
+    apiVersion: 1
+
+    datasources:
+      - name: Aquarium InfluxDB
+        type: influxdb
+        access: proxy
+        url: http://host.containers.internal:${toString cfg.influxdb.port}
+        jsonData:
+          version: Flux
+          organization: ${cfg.influxdb.organization}
+          defaultBucket: ${cfg.influxdb.bucket}
+          tlsSkipVerify: false
+        secureJsonData:
+          token: ''${INFLUXDB_TOKEN}
+  '';
 in
 {
   options.services.aquarium-monitor = {
@@ -64,7 +80,13 @@ in
       environmentFile = lib.mkOption {
         type = lib.types.nullOr lib.types.path;
         default = null;
-        description = "Uncommitted EnvironmentFile for InfluxDB initialization.";
+        description = ''
+          Host-provided EnvironmentFile for InfluxDB 2.x initialization. It must
+          define DOCKER_INFLUXDB_INIT_MODE, DOCKER_INFLUXDB_INIT_USERNAME,
+          DOCKER_INFLUXDB_INIT_PASSWORD, DOCKER_INFLUXDB_INIT_ORG,
+          DOCKER_INFLUXDB_INIT_BUCKET, and DOCKER_INFLUXDB_INIT_ADMIN_TOKEN.
+          Keep the file outside the Nix store; sops-nix can provide its runtime path.
+        '';
       };
       tokenFile = lib.mkOption {
         type = lib.types.path;
@@ -78,6 +100,18 @@ in
       image = lib.mkOption { type = lib.types.str; default = "grafana/grafana:11.5.2"; description = "Grafana image and tag."; };
       dataDir = lib.mkOption { type = lib.types.str; default = "/var/lib/aquarium-monitor/grafana"; description = "Persistent Grafana data directory."; };
       port = lib.mkOption { type = lib.types.port; default = 3000; description = "Local Grafana host port."; };
+      provisioning = {
+        enable = lib.mkEnableOption "an InfluxDB datasource provisioned in Grafana";
+        tokenEnvironmentFile = lib.mkOption {
+          type = lib.types.nullOr lib.types.path;
+          default = null;
+          description = ''
+            Host-provided EnvironmentFile containing INFLUXDB_TOKEN for Grafana
+            datasource provisioning. Keep this file outside the Nix store; sops-nix
+            can provide its runtime path.
+          '';
+        };
+      };
     };
   };
 
@@ -105,10 +139,23 @@ in
       };
     })
     (lib.mkIf cfg.grafana.enable {
+      assertions = lib.optionals cfg.grafana.provisioning.enable [
+        {
+          assertion = cfg.influxdb.enable;
+          message = "services.aquarium-monitor.grafana.provisioning.enable requires InfluxDB to be enabled";
+        }
+        {
+          assertion = cfg.grafana.provisioning.tokenEnvironmentFile != null;
+          message = "services.aquarium-monitor.grafana.provisioning.tokenEnvironmentFile must be set when datasource provisioning is enabled";
+        }
+      ];
       virtualisation.oci-containers.containers.grafana = {
         image = cfg.grafana.image;
         ports = [ "127.0.0.1:${toString cfg.grafana.port}:3000" ];
-        volumes = [ "${cfg.grafana.dataDir}:/var/lib/grafana" ];
+        volumes = [ "${cfg.grafana.dataDir}:/var/lib/grafana" ]
+          ++ lib.optional cfg.grafana.provisioning.enable
+            "${grafanaDatasourceProvisioning}:/etc/grafana/provisioning/datasources/aquarium-monitor.yml:ro";
+        environmentFiles = lib.optional cfg.grafana.provisioning.enable cfg.grafana.provisioning.tokenEnvironmentFile;
         dependsOn = lib.optional cfg.influxdb.enable "influxdb";
         extraOptions = [ "--pull=missing" "--restart=on-failure" ];
       };

@@ -212,11 +212,21 @@ nix develop --impure --command cargo run --quiet -p collector -- \
   `127.0.0.1:3000`.
 - Container data is persisted under `/var/lib/aquarium-monitor/` by default.
 
-Create `/etc/aquarium-monitor/influxdb.env` and
-`/run/keys/aquarium-monitor-influxdb-token` outside the repository with
-restrictive permissions. The environment file must contain InfluxDB's
-`DOCKER_INFLUXDB_INIT_*` values, including `DOCKER_INFLUXDB_INIT_ADMIN_TOKEN`;
-the token file contains that same token on one line.
+Create the InfluxDB initialization environment file and collector token file
+outside the repository with restrictive permissions. The path is normally
+provided by `sops-nix` on the host. The environment file passed to the
+InfluxDB container must contain these required variables:
+
+- `DOCKER_INFLUXDB_INIT_MODE`
+- `DOCKER_INFLUXDB_INIT_USERNAME`
+- `DOCKER_INFLUXDB_INIT_PASSWORD`
+- `DOCKER_INFLUXDB_INIT_ORG`
+- `DOCKER_INFLUXDB_INIT_BUCKET`
+- `DOCKER_INFLUXDB_INIT_ADMIN_TOKEN`
+
+The collector token file contains the same admin token on one line. InfluxDB
+uses these values during first-time setup; keep the file available for
+container startup and recovery.
 
 For example, the environment file can contain:
 
@@ -253,7 +263,13 @@ your host configuration:
     organization = "aquarium";
     bucket = "telemetry";
   };
-  services.aquarium-monitor.grafana.enable = true;
+  services.aquarium-monitor.grafana = {
+    enable = true;
+    provisioning = {
+      enable = true;
+      tokenEnvironmentFile = config.sops.secrets."aquarium-monitor/grafana-influxdb-token".path;
+    };
+  };
 }
 ```
 
@@ -262,10 +278,19 @@ The example assumes `sops-nix` is already enabled in the host configuration:
 ```nix
 sops.secrets."aquarium-monitor/influxdb-init" = { mode = "0400"; };
 sops.secrets."aquarium-monitor/influxdb-token" = { mode = "0400"; };
+sops.secrets."aquarium-monitor/grafana-influxdb-token" = { mode = "0400"; };
 ```
 
+The Grafana secret must be an EnvironmentFile containing
+`INFLUXDB_TOKEN=<the same admin token>`. Datasource provisioning is opt-in and
+creates no dashboards. The generated datasource file contains only the
+`${INFLUXDB_TOKEN}` placeholder; the secret is supplied to the container at
+runtime and is not placed in the Nix store. Grafana reaches InfluxDB through
+Podman's local host gateway at `host.containers.internal`.
+
 The repository module remains secret-provider agnostic; `sops-nix` supplies the
-paths and the collector receives the token through a systemd credential.
+runtime paths. The collector receives its token through a systemd credential,
+while Grafana receives its token through its secret EnvironmentFile.
 
 The module persists raw frames at
 `/var/lib/aquarium-monitor/raw-frames.ndjson` by default, starts the collector
@@ -313,6 +338,7 @@ paths, Podman storage, image pulls, and secret file ownership on the host.
 - [ ] Validate EZO-EC and DS18B20 integration on physical hardware
 - [x] InfluxDB 2.x device-mode sink with protected token-file configuration
 - [x] Optional NixOS-managed InfluxDB and Grafana OCI containers
+- [x] Optional Grafana InfluxDB 2.x datasource provisioning without store credentials
 - [ ] InfluxDB + Grafana live integration on target hardware
 - [ ] Rule-based alerting
 - [ ] Web UI (Dioxus)
