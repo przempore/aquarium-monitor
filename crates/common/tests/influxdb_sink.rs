@@ -36,6 +36,7 @@ impl HttpTransport for FakeTransport {
 #[test]
 fn combined_ec_and_ds18b20_sample_is_written_without_a_live_database() {
     let sample = TelemetrySample {
+        tank_id: "tank-1".into(),
         timestamp: OffsetDateTime::from_unix_timestamp(1_770_300_600).unwrap(),
         ec_us_cm: Some(450.0),
         temp_c: Some(26.187),
@@ -55,6 +56,6 @@ fn combined_ec_and_ds18b20_sample_is_written_without_a_live_database() {
     let body = String::from_utf8(sink.into_inner().body).unwrap();
     assert_eq!(
         body,
-        "aquarium_telemetry source=hardware quality=ok ec_us_cm=450,temp_c=26.187 1770300600000000000"
+        "aquarium_telemetry tank_id=tank-1 source=hardware quality=ok ec_us_cm=450,temp_c=26.187 1770300600000000000"
     );
 }

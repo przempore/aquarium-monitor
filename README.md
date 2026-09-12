@@ -135,12 +135,12 @@ final newline, and never logs or passes the token as a command-line argument.
 It writes:
 
 ```text
-aquarium_telemetry source=hardware quality=ok ec_us_cm=450,temp_c=26.187 1770300600000000000
+aquarium_telemetry tank_id=tank-1 source=hardware quality=ok ec_us_cm=450,temp_c=26.187 1770300600000000000
 ```
 
 The timestamp is nanoseconds since Unix epoch and requests use
-`/api/v2/write?org=...&bucket=...&precision=ns`. Only `source` and `quality`
-tags are currently available from the domain model; there is no `tank` tag.
+`/api/v2/write?org=...&bucket=...&precision=ns`. The stable `tank_id`, `source`,
+and `quality` values are escaped InfluxDB tags.
 The standard-library transport is intentionally restricted to local
 `http://` networking for now. HTTPS/TLS is not supported yet. Tokens are not
 included in displayed sink errors.
@@ -176,6 +176,7 @@ not by the UI being open.
 
 ```json
 {
+  "tank_id": "tank-1",
   "timestamp": "2026-02-05T15:10:00Z",
   "ec_us_cm": 132.4,
   "temp_c": 26.4,
@@ -189,13 +190,13 @@ logged separately as NDJSON records containing `timestamp` and `raw_frame`.
 The collector accepts the explicit configuration `--raw-log PATH`; normalized
 NDJSON remains on stdout.
 
-Device mode requires `--device PATH`, `--temperature-path PATH`, and
-`--interval-seconds N`:
+Device mode requires `--tank-id ID`, `--device PATH`, `--temperature-path PATH`,
+and `--interval-seconds N`:
 
 ```sh
 nix develop --impure --command cargo run --quiet -p collector -- \
   --device /dev/ttyUSB0 --temperature-path /sys/bus/w1/devices/28-000000000000/w1_slave \
-  --interval-seconds 1 --raw-log /tmp/ezo-ec-raw.ndjson
+  --tank-id tank-1 --interval-seconds 1 --raw-log /tmp/ezo-ec-raw.ndjson
 ```
 
 ---
@@ -242,18 +243,29 @@ your host configuration:
 
   services.aquarium-monitor.enable = true;
   services.aquarium-monitor.device = "/dev/ttyUSB0";
+  services.aquarium-monitor.tankId = "tank-1";
   services.aquarium-monitor.temperaturePath = "/sys/bus/w1/devices/28-000000000000/w1_slave";
-   services.aquarium-monitor.intervalSeconds = 1;
-   services.aquarium-monitor.influxdb = {
-     enable = true;
-     environmentFile = "/etc/aquarium-monitor/influxdb.env";
-     tokenFile = "/run/keys/aquarium-monitor-influxdb-token";
-     organization = "aquarium";
-     bucket = "telemetry";
-   };
-   services.aquarium-monitor.grafana.enable = true;
+  services.aquarium-monitor.intervalSeconds = 1;
+  services.aquarium-monitor.influxdb = {
+    enable = true;
+    environmentFile = config.sops.secrets."aquarium-monitor/influxdb-init".path;
+    tokenFile = config.sops.secrets."aquarium-monitor/influxdb-token".path;
+    organization = "aquarium";
+    bucket = "telemetry";
+  };
+  services.aquarium-monitor.grafana.enable = true;
 }
 ```
+
+The example assumes `sops-nix` is already enabled in the host configuration:
+
+```nix
+sops.secrets."aquarium-monitor/influxdb-init" = { mode = "0400"; };
+sops.secrets."aquarium-monitor/influxdb-token" = { mode = "0400"; };
+```
+
+The repository module remains secret-provider agnostic; `sops-nix` supplies the
+paths and the collector receives the token through a systemd credential.
 
 The module persists raw frames at
 `/var/lib/aquarium-monitor/raw-frames.ndjson` by default, starts the collector
@@ -268,8 +280,9 @@ When InfluxDB is enabled, it requires the local container and connects to
 Arbitrary baud rates are intentionally rejected until serial configuration is
 validated for this transport.
 
-Hardware mode requires both `device` and `temperaturePath`; the module passes
-both paths explicitly to the collector. Enable the Linux kernel modules with
+Hardware mode requires `tankId`, `device`, and `temperaturePath`; the module
+passes all three explicitly to the collector. `tankId` has no default because
+the reusable module is not inherently limited to one tank. Enable the Linux kernel modules with
 `boot.kernelModules = [ "w1-gpio" "w1-therm" ];`. Physical hardware and the
 OCI container setup have not been tested yet. Validate serial permissions, w1
 paths, Podman storage, image pulls, and secret file ownership on the host.

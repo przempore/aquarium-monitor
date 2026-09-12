@@ -30,6 +30,12 @@ in
       description = "Linux serial device path for an EZO-EC probe.";
     };
 
+    tankId = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      description = "Required stable tank identity for the hardware collector service.";
+    };
+
     temperaturePath = lib.mkOption {
       type = lib.types.nullOr lib.types.path;
       default = null;
@@ -110,6 +116,7 @@ in
     (lib.mkIf cfg.enable {
       assertions = [
         { assertion = cfg.device != null; message = "services.aquarium-monitor.device must be set for the hardware collector service"; }
+        { assertion = cfg.tankId != null && cfg.tankId != ""; message = "services.aquarium-monitor.tankId must be set for the hardware collector service"; }
         { assertion = cfg.temperaturePath != null; message = "services.aquarium-monitor.temperaturePath must be set for the hardware collector service"; }
         { assertion = cfg.baudRate == 9600; message = "services.aquarium-monitor.baudRate must be 9600; arbitrary baud rates are not supported yet"; }
       ] ++ lib.optional cfg.influxdb.enable {
@@ -127,6 +134,7 @@ in
           ExecStart = lib.escapeShellArgs ([
             "${cfg.package}/bin/collector" "--raw-log" cfg.rawLogPath
             "--device" cfg.device "--temperature-path" cfg.temperaturePath
+            "--tank-id" cfg.tankId
             "--interval-seconds" (toString cfg.intervalSeconds)
           ] ++ lib.optionals cfg.influxdb.enable [
             "--influx-url" "http://127.0.0.1:${toString cfg.influxdb.port}"

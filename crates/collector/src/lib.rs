@@ -274,7 +274,7 @@ pub fn collect_reader_with_raw_log<R: BufRead, W: Write, L: Write>(
 
     while let Some(frame) = source.read_frame_or_eof()? {
         raw_logger.write_frame(&frame)?;
-        match parse_ec_frame(&frame) {
+        match parse_ec_frame_for_tank("stdin-demo", &frame) {
             Ok(sample) => {
                 sink.write(sample).map_err(|error| {
                     io::Error::new(error.kind(), format!("collector sink failed: {error}"))
@@ -498,6 +498,11 @@ pub fn collect_once<S: Source>(
 
 /// Parse one EZO-EC read response, with or without its trailing `*OK` status.
 pub fn parse_ec_frame(frame: &str) -> Result<TelemetrySample, ParseError> {
+    parse_ec_frame_for_tank("test-tank", frame)
+}
+
+/// Parse one EZO-EC response and assign a stable tank identity.
+pub fn parse_ec_frame_for_tank(tank_id: &str, frame: &str) -> Result<TelemetrySample, ParseError> {
     let frame = frame
         .strip_suffix("\r\n")
         .or_else(|| frame.strip_suffix("\n\r"))
@@ -532,6 +537,7 @@ pub fn parse_ec_frame(frame: &str) -> Result<TelemetrySample, ParseError> {
     }
 
     Ok(TelemetrySample {
+        tank_id: tank_id.to_owned(),
         timestamp: OffsetDateTime::now_utc(),
         ec_us_cm: Some(value),
         temp_c: None,
@@ -798,6 +804,7 @@ mod tests {
     fn ndjson_sink_writes_one_sample_per_line() {
         let timestamp = OffsetDateTime::from_unix_timestamp(1_770_300_600).expect("timestamp");
         let sample = TelemetrySample {
+            tank_id: "tank-1".to_owned(),
             timestamp,
             ec_us_cm: Some(450.0),
             temp_c: None,

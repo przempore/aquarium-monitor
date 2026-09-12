@@ -8,8 +8,8 @@ replaceable sensor sources, and an optional UI.
 
 ## Completed milestones
 
-- Shared `TelemetrySample` model with timestamp, EC, temperature, source, and
-  quality fields.
+- Shared `TelemetrySample` model with required stable `tank_id`, timestamp, EC,
+  temperature, source, and quality fields.
 - Strict EZO-EC parser for valid response shape, measurement type, numeric
   finite non-negative values, and optional `*OK` status.
 - Deterministic, stateful EZO-EC simulator with command handling and changing
@@ -40,7 +40,8 @@ replaceable sensor sources, and an optional UI.
   injected-reader tests.
 - Combined EZO-EC plus DS18B20 normalization into one `TelemetrySample`.
 - Dependency-light synchronous InfluxDB 2.x line-protocol sink with an
-  injectable HTTP transport, HTTP-only standard-library client, and tests.
+  injectable HTTP transport, HTTP-only standard-library client, escaped tank
+  tags, and tests.
 
 ## Current data flow
 
@@ -80,7 +81,7 @@ collector has no signal handling yet.
 - No physical hardware or container deployment has been exercised; serial setup is delegated to
   `ExecStartPre` and currently supports only 9600 baud. DS18B20 integration is
   likewise untested against a physical sensor.
-- The NixOS service requires `device`, uses `/dev/null` as stdin, and needs host
+- The NixOS service requires `tankId` and `device`, uses `/dev/null` as stdin, and needs host
   udev/group policy to grant its `DynamicUser` access to the serial device.
 - No rules, alarms, or trend analysis.
 - No Grafana dashboards.
@@ -142,11 +143,11 @@ The sink writes measurement `aquarium_telemetry` with `source` and `quality`
 tags, optional `ec_us_cm` and `temp_c` fields, and nanosecond timestamps:
 
 ```text
-aquarium_telemetry source=hardware quality=ok ec_us_cm=450,temp_c=26.187 1770300600000000000
+aquarium_telemetry tank_id=tank-1 source=hardware quality=ok ec_us_cm=450,temp_c=26.187 1770300600000000000
 ```
 
-The current model has no tank identifier, so no tank tag is emitted. Tokens are
-redacted from configuration debug output and sink error display text.
+The model requires a tank identifier, emitted as the escaped `tank_id` tag.
+Tokens are redacted from configuration debug output and sink error display text.
 
 ## NixOS deployment files
 
@@ -155,6 +156,12 @@ Do not put credentials or generated container data in Nix source control. The
 default local ports are InfluxDB `127.0.0.1:8086` and Grafana `127.0.0.1:3000`;
 both containers are disabled unless explicitly enabled. Host validation remains
 required for hardware, Podman, directory ownership, and image availability.
+
+## Secret management
+
+The NixOS module accepts secret file paths so host configurations can use the
+existing `sops-nix` workflow. The module does not contain credentials and loads
+the collector token through a systemd credential.
 
 ## Next recommended milestone
 

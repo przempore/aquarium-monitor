@@ -8,6 +8,7 @@ let
       {
         services.aquarium-monitor.enable = true;
         services.aquarium-monitor.device = "/dev/ttyUSB0";
+        services.aquarium-monitor.tankId = "tank-1";
          services.aquarium-monitor.temperaturePath = "/sys/bus/w1/devices/28-test/w1_slave";
          services.aquarium-monitor.intervalSeconds = 2;
          services.aquarium-monitor.influxdb.enable = true;
@@ -21,6 +22,7 @@ let
 in
 assert service.serviceConfig.StandardInput == "null";
 assert builtins.match ".*--device.*" service.serviceConfig.ExecStart != null;
+assert builtins.match ".*--tank-id tank-1.*" service.serviceConfig.ExecStart != null;
 assert builtins.match ".*--temperature-path.*" service.serviceConfig.ExecStart != null;
 assert builtins.match ".*--interval-seconds 2.*" service.serviceConfig.ExecStart != null;
 assert builtins.match ".*--influx-url http://127.0.0.1:8086.*" service.serviceConfig.ExecStart != null;

@@ -21,6 +21,7 @@ pub trait Sink {
 /// Normalized telemetry shared by sensor adapters and downstream consumers.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TelemetrySample {
+    pub tank_id: String,
     pub timestamp: OffsetDateTime,
     pub ec_us_cm: Option<f32>,
     pub temp_c: Option<f32>,
@@ -64,6 +65,7 @@ mod tests {
     #[test]
     fn telemetry_round_trips_through_json() {
         let sample = TelemetrySample {
+            tank_id: "tank-1".to_owned(),
             timestamp: timestamp(),
             ec_us_cm: Some(132.4),
             temp_c: Some(26.4),
@@ -78,6 +80,7 @@ mod tests {
     #[test]
     fn optional_measurements_are_preserved() {
         let sample = TelemetrySample {
+            tank_id: "tank-1".to_owned(),
             timestamp: timestamp(),
             ec_us_cm: Some(450.0),
             temp_c: None,

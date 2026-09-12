@@ -1,7 +1,7 @@
 use collector::collect_reader_with_raw_log;
 use collector::{
     Ds18b20Source, EzoEcSource, NdjsonSink, SerialTransport, Sink, Source, combine_samples,
-    parse_ds18b20_frame, parse_ec_frame,
+    parse_ds18b20_frame, parse_ec_frame_for_tank,
 };
 use common::influxdb::{InfluxDbConfig, InfluxDbSink, StdHttpTransport};
 use std::env;
@@ -67,7 +67,10 @@ fn main() -> io::Result<()> {
                 }
             };
             raw_logger.write_frame(&temperature_frame)?;
-            let ec = match parse_ec_frame(&ec_frame) {
+            let ec = match parse_ec_frame_for_tank(
+                config.tank_id.as_deref().expect("validated tank id"),
+                &ec_frame,
+            ) {
                 Ok(sample) => sample,
                 Err(error) => {
                     eprintln!("EZO-EC parse failed: {error}");
@@ -101,6 +104,7 @@ fn main() -> io::Result<()> {
 #[derive(Debug, PartialEq, Eq)]
 struct Config {
     raw_log: PathBuf,
+    tank_id: Option<String>,
     device: Option<PathBuf>,
     temperature_path: Option<PathBuf>,
     interval: std::time::Duration,
@@ -119,6 +123,7 @@ impl Config {
     fn from_args(args: impl IntoIterator<Item = String>) -> io::Result<Self> {
         let mut args = args.into_iter();
         let mut raw_log = None;
+        let mut tank_id = None;
         let mut device = None;
         let mut interval = None;
         let mut temperature_path = None;
@@ -137,6 +142,7 @@ impl Config {
             }
             match argument.as_str() {
                 "--raw-log" => raw_log = Some(PathBuf::from(value)),
+                "--tank-id" => tank_id = Some(value),
                 "--device" => device = Some(PathBuf::from(value)),
                 "--temperature-path" => temperature_path = Some(PathBuf::from(value)),
                 "--influx-url" => influx_url = Some(value),
@@ -164,6 +170,9 @@ impl Config {
         if device.is_some() && interval.is_none() {
             return Err(invalid_arguments("--device requires --interval-seconds"));
         }
+        if device.is_some() && tank_id.is_none() {
+            return Err(invalid_arguments("--device requires --tank-id ID"));
+        }
         if device.is_some() != temperature_path.is_some() {
             return Err(invalid_arguments(
                 "--device and --temperature-path must be provided together",
@@ -189,6 +198,7 @@ impl Config {
         }
         Ok(Self {
             raw_log,
+            tank_id,
             device,
             temperature_path,
             interval: std::time::Duration::from_secs(interval.unwrap_or(0)),
@@ -259,6 +269,7 @@ mod tests {
                 .expect("valid arguments"),
             Config {
                 raw_log: PathBuf::from("frames.ndjson"),
+                tank_id: None,
                 device: None,
                 temperature_path: None,
                 interval: std::time::Duration::ZERO,
@@ -314,6 +325,8 @@ mod tests {
                 "frames.ndjson",
                 "--device",
                 "/dev/ttyUSB0",
+                "--tank-id",
+                "tank-1",
                 "--temperature-path",
                 "/sys/w1_slave",
                 "--interval-seconds",
@@ -339,6 +352,7 @@ mod tests {
                 token_file: "/run/keys/influx-token".into(),
             })
         );
+        assert_eq!(config.tank_id.as_deref(), Some("tank-1"));
     }
 
     #[test]
