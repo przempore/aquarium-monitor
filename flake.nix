@@ -21,9 +21,9 @@
     extra-substituters = "https://devenv.cachix.org";
   };
 
-  outputs = inputs: with inputs;
-
-    flake-utils.lib.eachDefaultSystem (system:
+  outputs = inputs@{ self, ... }: with inputs;
+    let
+      perSystem = system:
       let
         pkgs = import nixpkgs {
           inherit system;
@@ -41,6 +41,7 @@
             };
           in rec 
           {
+            collector = rustPkgs.workspace.collector { };
             simulator = rustPkgs.workspace.simulator-ezo-ec { };
             default = simulator;
           };
@@ -66,5 +67,19 @@
               ];
             };
           };
-      });
+        checks = {
+          module-evaluation = import ./nix/check-module.nix {
+            inherit nixpkgs;
+            inherit pkgs;
+            module = self.nixosModules.default;
+          };
+        };
+      };
+    in
+    (flake-utils.lib.eachDefaultSystem perSystem) // {
+      nixosModules.default = {
+        _module.args.defaultPackage = system: self.packages.${system}.collector;
+        imports = [ ./nix/module.nix ];
+      };
+    };
 }

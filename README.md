@@ -176,9 +176,28 @@ Managed via `docker-compose`.
 
 - Collector installed as a Nix package
 - Service managed by systemd
-- Requires access to:
-  - `journald`
-  - `/dev/ttyUSB*`
+
+The flake exports a reusable NixOS module. Import it and enable the service in
+your host configuration:
+
+```nix
+{
+  imports = [ inputs.aquarium-monitor.nixosModules.default ];
+
+  services.aquarium-monitor.enable = true;
+  # services.aquarium-monitor.rawLogPath = "/var/lib/aquarium-monitor/raw-frames.ndjson";
+}
+```
+
+The module persists raw frames at
+`/var/lib/aquarium-monitor/raw-frames.ndjson` by default, starts the collector
+at boot, and restarts it on failure. `services.aquarium-monitor.package` can
+override the flake's `packages.collector` default.
+
+The current collector reads stdin and exits when it receives EOF. The service
+therefore uses `/dev/null` as stdin and will exit immediately on a normal host;
+systemd will not restart a clean exit. A physical sensor source or another
+long-lived stdin producer is still required before production deployment.
 
 ---
 

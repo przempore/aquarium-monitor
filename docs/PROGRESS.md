@@ -30,6 +30,9 @@ replaceable sensor sources, and an optional UI.
   raw log while normalized NDJSON remains on stdout.
 - Continuous simulator mode: `--continuous` emits deterministic EZO-EC frames
   immediately and at a configurable positive `--interval-seconds N` interval.
+- NixOS deployment module: the flake exports `nixosModules.default`, with the
+  collector package exposed as `packages.collector`, a persistent raw log, and
+  a hardened systemd service definition.
 
 ## Current data flow
 
@@ -54,7 +57,9 @@ collector has no signal handling yet.
 
 - No InfluxDB storage or InfluxDB boundary.
 - No physical sensor or UART/USB hardware source.
-- No long-running service or systemd integration.
+- The systemd module currently supplies `/dev/null` as stdin because there is
+  no physical source yet. Since the collector exits on stdin EOF, enabling the
+  service alone exits immediately and is not a production deployment.
 - No rules, alarms, or trend analysis.
 - No Grafana dashboards.
 - No UI.
@@ -89,6 +94,17 @@ nix develop --impure --command sh -c \
 
 This runs until the simulator is stopped. The collector reads until EOF and
 then exits; it has no signal handling yet.
+
+## NixOS module
+
+Import `inputs.aquarium-monitor.nixosModules.default` into a NixOS host and
+set `services.aquarium-monitor.enable = true`. The module defaults to the
+flake's `packages.collector` and writes raw frames to
+`/var/lib/aquarium-monitor/raw-frames.ndjson`; set
+`services.aquarium-monitor.rawLogPath` or `package` to override those values.
+
+The module is packaging and service plumbing only. A hardware source or a
+long-lived stdin producer must be connected before enabling it in production.
 
 ## Next recommended milestone
 
