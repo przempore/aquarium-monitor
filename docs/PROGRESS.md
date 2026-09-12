@@ -50,13 +50,14 @@ EZO-EC simulator or stdin
         +-> RawFrameLogger -> local raw NDJSON log
         +-> strict EZO-EC parser
         -> TelemetrySample
-        -> NdjsonSink
-        -> stdout (one JSON object per line)
+         -> InfluxDbSink (hardware mode)
+         -> NdjsonSink (stdin/demo mode)
 ```
 
 Hardware mode reads the EZO-EC serial device and configured DS18B20 `w1_slave`
-path, logs both raw payloads, and emits a combined sample. NixOS hardware mode
-requires both paths and the host must enable `w1-gpio` and `w1-therm`.
+path, logs both raw payloads, and writes a combined sample to the selected sink.
+NixOS hardware mode requires both paths and the host must enable `w1-gpio` and
+`w1-therm`.
 
 The request/response source contract is connected to a synchronous Linux serial
 transport. The wrapper opens `/dev/tty*` or `/dev/ttyUSB*` read/write; systemd
@@ -72,11 +73,11 @@ collector has no signal handling yet.
 
 ## Explicit limitations
 
-- The live InfluxDB sink is implemented but is not selected by the collector
-  CLI or NixOS service yet; stdout NDJSON remains unchanged.
+- Device mode writes normalized samples to InfluxDB and does not emit routine
+  NDJSON to stdout; stdin/demo mode remains unchanged.
 - InfluxDB transport currently supports local `http://` networking only. HTTPS
   and TLS are intentionally deferred.
-- No physical hardware has been exercised; serial setup is delegated to
+- No physical hardware or container deployment has been exercised; serial setup is delegated to
   `ExecStartPre` and currently supports only 9600 baud. DS18B20 integration is
   likewise untested against a physical sensor.
 - The NixOS service requires `device`, uses `/dev/null` as stdin, and needs host
@@ -132,15 +133,30 @@ must be configured by the host.
 
 ## InfluxDB sink configuration
 
-`common::influxdb::InfluxDbConfig` requires explicit `url`, `organization`,
-`bucket`, and `token` values. The sink writes measurement
-`aquarium_telemetry` with `ec_us_cm` and optional `temp_c` fields, `source` and
-`quality` tags, and nanosecond timestamps (`precision=ns`). The current model
-has no tank identifier, so no tank tag is emitted. Tokens are redacted from
-configuration debug output and sink error display text.
+Hardware mode requires `--influx-url`, `--influx-organization`,
+`--influx-bucket`, and `--influx-token-file`. The token file is read at startup;
+its final newline is removed, but other whitespace is preserved. HTTPS is
+rejected because the standard-library transport supports local `http://` only.
+
+The sink writes measurement `aquarium_telemetry` with `source` and `quality`
+tags, optional `ec_us_cm` and `temp_c` fields, and nanosecond timestamps:
+
+```text
+aquarium_telemetry source=hardware quality=ok ec_us_cm=450,temp_c=26.187 1770300600000000000
+```
+
+The current model has no tank identifier, so no tank tag is emitted. Tokens are
+redacted from configuration debug output and sink error display text.
+
+## NixOS deployment files
+
+The README example requires uncommitted InfluxDB environment and token files.
+Do not put credentials or generated container data in Nix source control. The
+default local ports are InfluxDB `127.0.0.1:8086` and Grafana `127.0.0.1:3000`;
+both containers are disabled unless explicitly enabled. Host validation remains
+required for hardware, Podman, directory ownership, and image availability.
 
 ## Next recommended milestone
 
-Exercise the serial path on target hardware and validate any additional baud
-rates before adding a normalized telemetry database or deployment.
-integration and explicit sink selection in the collector service.
+Exercise the serial path and OCI services on the target host, then validate
+Grafana dashboards and InfluxDB retention settings.

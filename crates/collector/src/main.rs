@@ -3,8 +3,9 @@ use collector::{
     Ds18b20Source, EzoEcSource, NdjsonSink, SerialTransport, Sink, Source, combine_samples,
     parse_ds18b20_frame, parse_ec_frame,
 };
+use common::influxdb::{InfluxDbConfig, InfluxDbSink, StdHttpTransport};
 use std::env;
-use std::fs::OpenOptions;
+use std::fs::{self, OpenOptions};
 use std::io::{self, BufWriter};
 use std::path::PathBuf;
 
@@ -31,7 +32,21 @@ fn main() -> io::Result<()> {
         let mut source = EzoEcSource::new(transport);
         let mut temperature_source =
             Ds18b20Source::from_path(config.temperature_path.expect("validated temperature path"));
-        let mut sink = NdjsonSink::new(BufWriter::new(io::stdout().lock()));
+        let mut sink = match config.influx {
+            Some(influx) => {
+                let token = read_token_file(&influx.token_file)?;
+                DeviceSink::Influx(
+                    InfluxDbSink::new(
+                        InfluxDbConfig::new(influx.url, influx.organization, influx.bucket, token),
+                        StdHttpTransport,
+                    )
+                    .map_err(|error| {
+                        io::Error::new(io::ErrorKind::InvalidInput, error.to_string())
+                    })?,
+                )
+            }
+            None => DeviceSink::Ndjson(NdjsonSink::new(BufWriter::new(io::stdout()))),
+        };
         let mut raw_logger = collector::RawFrameLogger::new(BufWriter::new(&raw_file));
         loop {
             let ec_frame = match source.read_frame() {
@@ -89,6 +104,15 @@ struct Config {
     device: Option<PathBuf>,
     temperature_path: Option<PathBuf>,
     interval: std::time::Duration,
+    influx: Option<InfluxConfig>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct InfluxConfig {
+    url: String,
+    organization: String,
+    bucket: String,
+    token_file: PathBuf,
 }
 
 impl Config {
@@ -98,6 +122,10 @@ impl Config {
         let mut device = None;
         let mut interval = None;
         let mut temperature_path = None;
+        let mut influx_url = None;
+        let mut influx_organization = None;
+        let mut influx_bucket = None;
+        let mut influx_token_file = None;
         while let Some(argument) = args.next() {
             let value = args
                 .next()
@@ -111,6 +139,10 @@ impl Config {
                 "--raw-log" => raw_log = Some(PathBuf::from(value)),
                 "--device" => device = Some(PathBuf::from(value)),
                 "--temperature-path" => temperature_path = Some(PathBuf::from(value)),
+                "--influx-url" => influx_url = Some(value),
+                "--influx-organization" => influx_organization = Some(value),
+                "--influx-bucket" => influx_bucket = Some(value),
+                "--influx-token-file" => influx_token_file = Some(PathBuf::from(value)),
                 "--interval-seconds" => {
                     let seconds = value.parse::<u64>().map_err(|_| {
                         invalid_arguments("--interval-seconds requires a positive integer")
@@ -137,12 +169,78 @@ impl Config {
                 "--device and --temperature-path must be provided together",
             ));
         }
+        let influx_values = [
+            influx_url.is_some(),
+            influx_organization.is_some(),
+            influx_bucket.is_some(),
+            influx_token_file.is_some(),
+        ];
+        if influx_values.iter().any(|present| *present)
+            && !influx_values.iter().all(|present| *present)
+        {
+            return Err(invalid_arguments(
+                "--influx-url, --influx-organization, --influx-bucket, and --influx-token-file must be provided together",
+            ));
+        }
+        if device.is_none() && influx_values.iter().any(|present| *present) {
+            return Err(invalid_arguments(
+                "InfluxDB options require --device hardware mode",
+            ));
+        }
         Ok(Self {
             raw_log,
             device,
             temperature_path,
             interval: std::time::Duration::from_secs(interval.unwrap_or(0)),
+            influx: influx_url.map(|url| InfluxConfig {
+                url,
+                organization: influx_organization.expect("validated organization"),
+                bucket: influx_bucket.expect("validated bucket"),
+                token_file: influx_token_file.expect("validated token file"),
+            }),
         })
+    }
+}
+
+fn read_token_file(path: &std::path::Path) -> io::Result<String> {
+    let token = fs::read_to_string(path).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("read InfluxDB token file {}: {error}", path.display()),
+        )
+    })?;
+    let token = token.strip_suffix('\n').unwrap_or(&token);
+    let token = token.strip_suffix('\r').unwrap_or(token);
+    if token.is_empty() {
+        return Err(invalid_arguments("InfluxDB token file is empty"));
+    }
+    Ok(token.to_owned())
+}
+
+enum DeviceSink {
+    Influx(InfluxDbSink<StdHttpTransport>),
+    Ndjson(NdjsonSink<BufWriter<io::Stdout>>),
+}
+
+impl Sink for DeviceSink {
+    type Error = io::Error;
+
+    fn write(&mut self, sample: common::TelemetrySample) -> Result<(), Self::Error> {
+        match self {
+            Self::Influx(sink) => sink
+                .write(sample)
+                .map_err(|error| io::Error::other(error.to_string())),
+            Self::Ndjson(sink) => sink.write(sample),
+        }
+    }
+}
+
+impl DeviceSink {
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            Self::Influx(_) => Ok(()),
+            Self::Ndjson(sink) => sink.flush(),
+        }
     }
 }
 
@@ -164,6 +262,7 @@ mod tests {
                 device: None,
                 temperature_path: None,
                 interval: std::time::Duration::ZERO,
+                influx: None,
             }
         );
     }
@@ -205,5 +304,51 @@ mod tests {
         ] {
             assert!(Config::from_args(args).is_err());
         }
+    }
+
+    #[test]
+    fn parses_complete_influx_device_configuration() {
+        let config = Config::from_args(
+            [
+                "--raw-log",
+                "frames.ndjson",
+                "--device",
+                "/dev/ttyUSB0",
+                "--temperature-path",
+                "/sys/w1_slave",
+                "--interval-seconds",
+                "1",
+                "--influx-url",
+                "http://127.0.0.1:8086",
+                "--influx-organization",
+                "aquarium",
+                "--influx-bucket",
+                "telemetry",
+                "--influx-token-file",
+                "/run/keys/influx-token",
+            ]
+            .map(str::to_owned),
+        )
+        .expect("valid configuration");
+        assert_eq!(
+            config.influx,
+            Some(InfluxConfig {
+                url: "http://127.0.0.1:8086".into(),
+                organization: "aquarium".into(),
+                bucket: "telemetry".into(),
+                token_file: "/run/keys/influx-token".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn token_file_removes_only_final_newline_and_never_appears_in_error() {
+        let path = std::env::temp_dir().join(format!("aquarium-token-{}", std::process::id()));
+        fs::write(&path, "secret-token\n").expect("write token fixture");
+        assert_eq!(read_token_file(&path).expect("read token"), "secret-token");
+        fs::remove_file(&path).expect("remove token fixture");
+
+        let error = read_token_file(&path).expect_err("missing token should fail");
+        assert!(!error.to_string().contains("secret-token"));
     }
 }

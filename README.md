@@ -79,8 +79,10 @@ systemd configures it with `stty` before starting the collector.
 
 ### 2. Collector (Rust)
 The collector supports synchronous stdin batch mode and long-lived Linux device
-mode. Device mode requests one frame per interval, logs it before parsing,
-reports source/parse errors on stderr, and emits normalized NDJSON on stdout.
+mode. Device mode requests one frame per interval, logs it before parsing, and
+reports source/parse errors on stderr. With explicit InfluxDB options it writes
+normalized combined samples to InfluxDB; otherwise it retains normalized NDJSON
+on stdout. Stdin mode is unchanged.
 
 Responsibilities:
 - Poll sensor sources at a fixed interval
@@ -126,10 +128,11 @@ EOF.
 - Retention and downsampling handled natively
 - Queried by Grafana
 
-The synchronous InfluxDB 2.x sink is implemented in `common`, but is not yet
-selected by the collector CLI or NixOS service. Normalized stdout NDJSON is
-therefore unchanged. It requires explicit `url`, `organization`, `bucket`, and
-`token` configuration and writes:
+The synchronous InfluxDB 2.x sink is selected by hardware mode and requires
+explicit `url`, `organization`, `bucket`, and token-file configuration. The
+collector reads the token from a protected file at startup, removes only its
+final newline, and never logs or passes the token as a command-line argument.
+It writes:
 
 ```text
 aquarium_telemetry source=hardware quality=ok ec_us_cm=450,temp_c=26.187 1770300600000000000
@@ -199,12 +202,31 @@ nix develop --impure --command cargo run --quiet -p collector -- \
 
 ## Deployment model
 
-### Docker
+### NixOS / systemd and OCI containers
 
-- InfluxDB
-- Grafana
+- The collector runs as a native systemd service.
+- Optional InfluxDB and Grafana containers are managed by
+  `virtualisation.oci-containers` (Podman), not Docker Compose.
+- InfluxDB is bound to `127.0.0.1:8086`; Grafana is bound to
+  `127.0.0.1:3000`.
+- Container data is persisted under `/var/lib/aquarium-monitor/` by default.
 
-Managed via `docker-compose`.
+Create `/etc/aquarium-monitor/influxdb.env` and
+`/run/keys/aquarium-monitor-influxdb-token` outside the repository with
+restrictive permissions. The environment file must contain InfluxDB's
+`DOCKER_INFLUXDB_INIT_*` values, including `DOCKER_INFLUXDB_INIT_ADMIN_TOKEN`;
+the token file contains that same token on one line.
+
+For example, the environment file can contain:
+
+```text
+DOCKER_INFLUXDB_INIT_MODE=setup
+DOCKER_INFLUXDB_INIT_USERNAME=aquarium
+DOCKER_INFLUXDB_INIT_PASSWORD=use-a-local-password
+DOCKER_INFLUXDB_INIT_ORG=aquarium
+DOCKER_INFLUXDB_INIT_BUCKET=telemetry
+DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=replace-with-a-long-random-token
+```
 
 ### NixOS / systemd
 
@@ -221,8 +243,15 @@ your host configuration:
   services.aquarium-monitor.enable = true;
   services.aquarium-monitor.device = "/dev/ttyUSB0";
   services.aquarium-monitor.temperaturePath = "/sys/bus/w1/devices/28-000000000000/w1_slave";
-  services.aquarium-monitor.intervalSeconds = 1;
-  # services.aquarium-monitor.rawLogPath = "/var/lib/aquarium-monitor/raw-frames.ndjson";
+   services.aquarium-monitor.intervalSeconds = 1;
+   services.aquarium-monitor.influxdb = {
+     enable = true;
+     environmentFile = "/etc/aquarium-monitor/influxdb.env";
+     tokenFile = "/run/keys/aquarium-monitor-influxdb-token";
+     organization = "aquarium";
+     bucket = "telemetry";
+   };
+   services.aquarium-monitor.grafana.enable = true;
 }
 ```
 
@@ -234,13 +263,16 @@ override the flake's `packages.collector` default. The service uses `stty` in
 udev/group policy so the service's `DynamicUser` can open the device.
 
 The service uses `/dev/null` as stdin and runs the long-lived device collector.
+When InfluxDB is enabled, it requires the local container and connects to
+`http://127.0.0.1:8086`.
 Arbitrary baud rates are intentionally rejected until serial configuration is
 validated for this transport.
 
 Hardware mode requires both `device` and `temperaturePath`; the module passes
 both paths explicitly to the collector. Enable the Linux kernel modules with
-`boot.kernelModules = [ "w1-gpio" "w1-therm" ];`. Physical hardware has not
-been tested yet.
+`boot.kernelModules = [ "w1-gpio" "w1-therm" ];`. Physical hardware and the
+OCI container setup have not been tested yet. Validate serial permissions, w1
+paths, Podman storage, image pulls, and secret file ownership on the host.
 
 ---
 
@@ -266,8 +298,9 @@ been tested yet.
 - [x] Linux serial transport, bounded polling API, and long-lived physical source mode
 - [x] DS18B20 Linux w1 parser/source, combined samples, and NixOS path configuration
 - [ ] Validate EZO-EC and DS18B20 integration on physical hardware
-- [x] InfluxDB 2.x sink implementation (not yet selected by NixOS service)
-- [ ] InfluxDB + Grafana live integration
+- [x] InfluxDB 2.x device-mode sink with protected token-file configuration
+- [x] Optional NixOS-managed InfluxDB and Grafana OCI containers
+- [ ] InfluxDB + Grafana live integration on target hardware
 - [ ] Rule-based alerting
 - [ ] Web UI (Dioxus)
 - [ ] AI-assisted interpretation layer
