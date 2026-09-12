@@ -95,6 +95,20 @@ printf '?R,EC,450.00\n\r*OK\n\r' | cargo run -p collector -- --raw-log raw-frame
 Normalized telemetry is emitted on stdout; raw frames are appended to the
 configured file.
 
+The simulator can also provide a live deterministic stream directly to the
+collector. It emits one EZO-EC frame immediately and then once per second:
+
+```sh
+nix develop --impure --command sh -c \
+  'cargo run --quiet -p simulator-ezo-ec -- --continuous | \
+   cargo run --quiet -p collector -- --raw-log raw-frames.ndjson'
+```
+
+Use `--interval-seconds N` with `--continuous` to choose a positive interval.
+The collector still reads stdin until EOF and has no signal handling yet. Stop
+the simulator to close the pipe; the collector then finishes after receiving
+EOF.
+
 ---
 
 ### 3. Storage: InfluxDB
@@ -185,6 +199,7 @@ Managed via `docker-compose`.
 - [x] Collector MVP (stdin framing, parsing, and NDJSON output)
 - [x] Local raw-frame NDJSON logging, including malformed frames, with
       `--raw-log PATH` collector configuration
+- [x] Continuous deterministic simulator mode with configurable interval
 - [ ] Long-lived polling and physical sensor source integration
 - [ ] InfluxDB + Grafana integration
 - [ ] Rule-based alerting

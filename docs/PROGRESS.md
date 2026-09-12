@@ -25,6 +25,8 @@ replaceable sensor sources, and an optional UI.
   rejected frames.
 - Minimal collector configuration: `--raw-log PATH` selects an append-only
   raw log while normalized NDJSON remains on stdout.
+- Continuous simulator mode: `--continuous` emits deterministic EZO-EC frames
+  immediately and at a configurable positive `--interval-seconds N` interval.
 
 ## Current data flow
 
@@ -41,6 +43,9 @@ EZO-EC simulator or stdin
 The current collector executable reads until EOF. It persists raw input when
 invoked with `--raw-log PATH`; normalized output remains on stdout. It does not
 yet run a long-lived polling service or persist normalized output to a database.
+The simulator can run continuously as the collector's stdin; stopping the
+simulator closes the pipe, allowing the collector to observe EOF and exit. The
+collector has no signal handling yet.
 
 ## Explicit limitations
 
@@ -70,6 +75,17 @@ nix develop --impure --command sh -c 'printf "R\nR\n" | cargo run --quiet -p sim
 
 The second command emits two normalized NDJSON samples and appends both raw
 frames to the local raw log.
+
+For the two-process live path:
+
+```sh
+nix develop --impure --command sh -c \
+  'cargo run --quiet -p simulator-ezo-ec -- --continuous --interval-seconds 2 | \
+   cargo run --quiet -p collector -- --raw-log /tmp/aquarium-monitor-live.ndjson'
+```
+
+This runs until the simulator is stopped. The collector reads until EOF and
+then exits; it has no signal handling yet.
 
 ## Next recommended milestone
 
