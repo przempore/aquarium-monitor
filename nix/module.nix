@@ -35,6 +35,12 @@ in
       description = "Linux serial device path for an EZO-EC probe.";
     };
 
+    temperaturePath = lib.mkOption {
+      type = lib.types.nullOr lib.types.path;
+      default = null;
+      description = "Linux w1_slave path for a DS18B20 temperature sensor.";
+    };
+
     intervalSeconds = lib.mkOption {
       type = lib.types.ints.positive;
       default = 1;
@@ -55,6 +61,10 @@ in
         message = "services.aquarium-monitor.device must be set for the hardware collector service";
       }
       {
+        assertion = cfg.temperaturePath != null;
+        message = "services.aquarium-monitor.temperaturePath must be set for the hardware collector service";
+      }
+      {
         assertion = cfg.baudRate == 9600;
         message = "services.aquarium-monitor.baudRate must be 9600; arbitrary baud rates are not supported yet";
       }
@@ -71,6 +81,8 @@ in
           cfg.rawLogPath
           "--device"
           cfg.device
+          "--temperature-path"
+          cfg.temperaturePath
           "--interval-seconds"
           (toString cfg.intervalSeconds)
         ];

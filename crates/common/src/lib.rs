@@ -26,6 +26,12 @@ pub struct TelemetrySample {
     pub quality: Quality,
 }
 
+/// A normalized temperature reading independent of its sensor transport.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct TemperatureSample {
+    pub temp_c: f32,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SourceId {
     #[default]
@@ -33,6 +39,8 @@ pub enum SourceId {
     Simulator,
     #[serde(rename = "ezo_ec")]
     EzoEc,
+    #[serde(rename = "hardware")]
+    Hardware,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

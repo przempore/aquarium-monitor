@@ -67,7 +67,10 @@ Hardware planned for the initial build:
 
 Both are abstracted behind a common `Source` interface.
 
-The transport-neutral EZO-EC request/response source contract is implemented:
+The transport-neutral EZO-EC request/response source contract is implemented.
+The Linux w1 DS18B20 source parses standard `w1_slave` files, validates the
+`YES` CRC marker, and normalizes `t=` millidegrees Celsius. Hardware mode
+combines one valid reading from each sensor into one `TelemetrySample`.
 it sends `R\r`, flushes the transport, and reads complete simulator-compatible
 responses. A synchronous Linux serial transport opens the configured device;
 systemd configures it with `stty` before starting the collector.
@@ -167,11 +170,13 @@ logged separately as NDJSON records containing `timestamp` and `raw_frame`.
 The collector accepts the explicit configuration `--raw-log PATH`; normalized
 NDJSON remains on stdout.
 
-Device mode requires both `--device PATH` and `--interval-seconds N`:
+Device mode requires `--device PATH`, `--temperature-path PATH`, and
+`--interval-seconds N`:
 
 ```sh
 nix develop --impure --command cargo run --quiet -p collector -- \
-  --device /dev/ttyUSB0 --interval-seconds 1 --raw-log /tmp/ezo-ec-raw.ndjson
+  --device /dev/ttyUSB0 --temperature-path /sys/bus/w1/devices/28-000000000000/w1_slave \
+  --interval-seconds 1 --raw-log /tmp/ezo-ec-raw.ndjson
 ```
 
 ---
@@ -199,6 +204,7 @@ your host configuration:
 
   services.aquarium-monitor.enable = true;
   services.aquarium-monitor.device = "/dev/ttyUSB0";
+  services.aquarium-monitor.temperaturePath = "/sys/bus/w1/devices/28-000000000000/w1_slave";
   services.aquarium-monitor.intervalSeconds = 1;
   # services.aquarium-monitor.rawLogPath = "/var/lib/aquarium-monitor/raw-frames.ndjson";
 }
@@ -214,6 +220,11 @@ udev/group policy so the service's `DynamicUser` can open the device.
 The service uses `/dev/null` as stdin and runs the long-lived device collector.
 Arbitrary baud rates are intentionally rejected until serial configuration is
 validated for this transport.
+
+Hardware mode requires both `device` and `temperaturePath`; the module passes
+both paths explicitly to the collector. Enable the Linux kernel modules with
+`boot.kernelModules = [ "w1-gpio" "w1-therm" ];`. Physical hardware has not
+been tested yet.
 
 ---
 
@@ -237,6 +248,8 @@ validated for this transport.
 - [x] Continuous deterministic simulator mode with configurable interval
 - [x] Transport-neutral EZO-EC request/response source contract
 - [x] Linux serial transport, bounded polling API, and long-lived physical source mode
+- [x] DS18B20 Linux w1 parser/source, combined samples, and NixOS path configuration
+- [ ] Validate EZO-EC and DS18B20 integration on physical hardware
 - [ ] InfluxDB + Grafana integration
 - [ ] Rule-based alerting
 - [ ] Web UI (Dioxus)

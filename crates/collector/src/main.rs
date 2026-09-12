@@ -1,5 +1,8 @@
 use collector::collect_reader_with_raw_log;
-use collector::{EzoEcSource, NdjsonSink, PollingConfig, SerialTransport, poll_with_raw_log};
+use collector::{
+    Ds18b20Source, EzoEcSource, NdjsonSink, SerialTransport, Sink, Source, combine_samples,
+    parse_ds18b20_frame, parse_ec_frame,
+};
 use std::env;
 use std::fs::OpenOptions;
 use std::io::{self, BufWriter};
@@ -26,22 +29,47 @@ fn main() -> io::Result<()> {
             )
         })?;
         let mut source = EzoEcSource::new(transport);
+        let mut temperature_source =
+            Ds18b20Source::from_path(config.temperature_path.expect("validated temperature path"));
         let mut sink = NdjsonSink::new(BufWriter::new(io::stdout().lock()));
+        let mut raw_logger = collector::RawFrameLogger::new(BufWriter::new(&raw_file));
         loop {
-            let report = poll_with_raw_log(
-                &mut source,
-                &mut sink,
-                BufWriter::new(&raw_file),
-                PollingConfig {
-                    attempts: 1,
-                    interval: config.interval,
-                },
-                std::thread::sleep,
-            )
-            .map_err(|error| io::Error::other(format!("collector stopped: {error}")))?;
-            for failure in report.failures {
-                eprintln!("collector {failure}");
-            }
+            let ec_frame = match source.read_frame() {
+                Ok(frame) => frame,
+                Err(error) => {
+                    eprintln!("EZO-EC source failed: {error}");
+                    std::thread::sleep(config.interval);
+                    continue;
+                }
+            };
+            raw_logger.write_frame(&ec_frame)?;
+            let temperature_frame = match temperature_source.read_frame() {
+                Ok(frame) => frame,
+                Err(error) => {
+                    eprintln!("DS18B20 source failed: {error}");
+                    std::thread::sleep(config.interval);
+                    continue;
+                }
+            };
+            raw_logger.write_frame(&temperature_frame)?;
+            let ec = match parse_ec_frame(&ec_frame) {
+                Ok(sample) => sample,
+                Err(error) => {
+                    eprintln!("EZO-EC parse failed: {error}");
+                    std::thread::sleep(config.interval);
+                    continue;
+                }
+            };
+            let temperature = match parse_ds18b20_frame(&temperature_frame) {
+                Ok(sample) => sample,
+                Err(error) => {
+                    eprintln!("DS18B20 parse failed: {error}");
+                    std::thread::sleep(config.interval);
+                    continue;
+                }
+            };
+            sink.write(combine_samples(ec, temperature))
+                .map_err(|error| io::Error::other(format!("collector sink failed: {error}")))?;
             sink.flush()?;
             std::thread::sleep(config.interval);
         }
@@ -59,6 +87,7 @@ fn main() -> io::Result<()> {
 struct Config {
     raw_log: PathBuf,
     device: Option<PathBuf>,
+    temperature_path: Option<PathBuf>,
     interval: std::time::Duration,
 }
 
@@ -68,6 +97,7 @@ impl Config {
         let mut raw_log = None;
         let mut device = None;
         let mut interval = None;
+        let mut temperature_path = None;
         while let Some(argument) = args.next() {
             let value = args
                 .next()
@@ -80,6 +110,7 @@ impl Config {
             match argument.as_str() {
                 "--raw-log" => raw_log = Some(PathBuf::from(value)),
                 "--device" => device = Some(PathBuf::from(value)),
+                "--temperature-path" => temperature_path = Some(PathBuf::from(value)),
                 "--interval-seconds" => {
                     let seconds = value.parse::<u64>().map_err(|_| {
                         invalid_arguments("--interval-seconds requires a positive integer")
@@ -101,9 +132,15 @@ impl Config {
         if device.is_some() && interval.is_none() {
             return Err(invalid_arguments("--device requires --interval-seconds"));
         }
+        if device.is_some() != temperature_path.is_some() {
+            return Err(invalid_arguments(
+                "--device and --temperature-path must be provided together",
+            ));
+        }
         Ok(Self {
             raw_log,
             device,
+            temperature_path,
             interval: std::time::Duration::from_secs(interval.unwrap_or(0)),
         })
     }
@@ -125,6 +162,7 @@ mod tests {
             Config {
                 raw_log: PathBuf::from("frames.ndjson"),
                 device: None,
+                temperature_path: None,
                 interval: std::time::Duration::ZERO,
             }
         );
@@ -155,6 +193,14 @@ mod tests {
                 "/dev/ttyUSB0".to_owned(),
                 "--interval-seconds".to_owned(),
                 "0".to_owned(),
+            ],
+            vec![
+                "--raw-log".to_owned(),
+                "frames.ndjson".to_owned(),
+                "--device".to_owned(),
+                "/dev/ttyUSB0".to_owned(),
+                "--interval-seconds".to_owned(),
+                "1".to_owned(),
             ],
         ] {
             assert!(Config::from_args(args).is_err());

@@ -5,8 +5,20 @@ use std::io::{self, BufRead, Write};
 use std::time::Duration;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
+mod ds18b20;
 mod serial;
+pub use common::TemperatureSample;
+pub use ds18b20::{Ds18b20Error, Ds18b20Source, parse_ds18b20_frame};
 pub use serial::SerialTransport;
+
+/// Combines readings from the EZO-EC and DS18B20 sensors into one sample.
+pub fn combine_samples(ec: TelemetrySample, temperature: TemperatureSample) -> TelemetrySample {
+    TelemetrySample {
+        temp_c: Some(temperature.temp_c),
+        source: SourceId::Hardware,
+        ..ec
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParseError {
@@ -1051,5 +1063,20 @@ mod tests {
 
         assert_eq!(report.successful_samples, 1);
         assert_eq!(sink.samples[0].ec_us_cm, Some(450.0));
+    }
+
+    #[test]
+    fn combines_valid_ezo_and_ds18b20_readings() {
+        let mut simulator = simulator_ezo_ec::EzoEcCore::new();
+        let ec = parse_ec_frame(&simulator.handle_command("R")).expect("valid EZO frame");
+        let temperature = parse_ds18b20_frame(
+            "9e 01 4b 46 7f ff 02 10 10 : crc=10 YES\n9e 01 4b 46 7f ff 02 10 10 t=26187\n",
+        )
+        .expect("valid DS18B20 fixture");
+
+        let sample = combine_samples(ec, temperature);
+        assert_eq!(sample.ec_us_cm, Some(450.0));
+        assert_eq!(sample.temp_c, Some(26.187));
+        assert_eq!(sample.source, SourceId::Hardware);
     }
 }

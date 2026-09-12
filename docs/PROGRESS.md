@@ -35,6 +35,10 @@ replaceable sensor sources, and an optional UI.
   a hardened systemd service definition.
 - Transport-neutral EZO-EC request/response source implementing `common::Source`;
   it sends `R\r`, flushes, and reads simulator-compatible framed responses.
+- Synchronous DS18B20 Linux w1 source/parser for `w1_slave` content, including
+  `YES` CRC validation, millidegree conversion, typed parse/I/O errors, and
+  injected-reader tests.
+- Combined EZO-EC plus DS18B20 normalization into one `TelemetrySample`.
 
 ## Current data flow
 
@@ -47,6 +51,10 @@ EZO-EC simulator or stdin
         -> NdjsonSink
         -> stdout (one JSON object per line)
 ```
+
+Hardware mode reads the EZO-EC serial device and configured DS18B20 `w1_slave`
+path, logs both raw payloads, and emits a combined sample. NixOS hardware mode
+requires both paths and the host must enable `w1-gpio` and `w1-therm`.
 
 The request/response source contract is connected to a synchronous Linux serial
 transport. The wrapper opens `/dev/tty*` or `/dev/ttyUSB*` read/write; systemd
@@ -64,7 +72,8 @@ collector has no signal handling yet.
 
 - No InfluxDB storage or InfluxDB boundary.
 - No physical hardware has been exercised; serial setup is delegated to
-  `ExecStartPre` and currently supports only 9600 baud.
+  `ExecStartPre` and currently supports only 9600 baud. DS18B20 integration is
+  likewise untested against a physical sensor.
 - The NixOS service requires `device`, uses `/dev/null` as stdin, and needs host
   udev/group policy to grant its `DynamicUser` access to the serial device.
 - No rules, alarms, or trend analysis.
@@ -105,7 +114,8 @@ then exits; it has no signal handling yet.
 ## NixOS module
 
 Import `inputs.aquarium-monitor.nixosModules.default` into a NixOS host and
-set `services.aquarium-monitor.enable = true`, `device = "/dev/ttyUSB0"`, and
+set `services.aquarium-monitor.enable = true`, `device = "/dev/ttyUSB0"`,
+`temperaturePath = "/sys/bus/w1/devices/28-.../w1_slave"`, and
 `intervalSeconds = 1`. The module defaults to the
 flake's `packages.collector` and writes raw frames to
 `/var/lib/aquarium-monitor/raw-frames.ndjson`; set
