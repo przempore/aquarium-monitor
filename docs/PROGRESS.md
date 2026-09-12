@@ -48,12 +48,14 @@ EZO-EC simulator or stdin
         -> stdout (one JSON object per line)
 ```
 
-The request/response source contract is implemented, but no `/dev/ttyUSB*`
-transport or configuration is wired yet.
+The request/response source contract is connected to a synchronous Linux serial
+transport. The wrapper opens `/dev/tty*` or `/dev/ttyUSB*` read/write; systemd
+configures the line with `stty`.
 
 The current collector executable reads until EOF. It persists raw input when
 invoked with `--raw-log PATH`; normalized output remains on stdout. It does not
-yet run a long-lived polling service or persist normalized output to a database.
+now runs a long-lived synchronous device polling service while still supporting
+stdin batch mode. Its bounded, injectable polling API keeps tests finite.
 The simulator can run continuously as the collector's stdin; stopping the
 simulator closes the pipe, allowing the collector to observe EOF and exit. The
 collector has no signal handling yet.
@@ -61,11 +63,10 @@ collector has no signal handling yet.
 ## Explicit limitations
 
 - No InfluxDB storage or InfluxDB boundary.
-- No physical sensor or UART/USB hardware transport/configuration; the
-  transport-neutral EZO-EC source is not connected to `/dev/ttyUSB*` yet.
-- The systemd module currently supplies `/dev/null` as stdin because there is
-  no physical source yet. Since the collector exits on stdin EOF, enabling the
-  service alone exits immediately and is not a production deployment.
+- No physical hardware has been exercised; serial setup is delegated to
+  `ExecStartPre` and currently supports only 9600 baud.
+- The NixOS service requires `device`, uses `/dev/null` as stdin, and needs host
+  udev/group policy to grant its `DynamicUser` access to the serial device.
 - No rules, alarms, or trend analysis.
 - No Grafana dashboards.
 - No UI.
@@ -75,7 +76,7 @@ collector has no signal handling yet.
 
 ## Verification
 
-Run the workspace tests:
+Run the workspace tests (passing for this milestone):
 
 ```sh
 nix develop --impure -c cargo test --workspace
@@ -104,17 +105,18 @@ then exits; it has no signal handling yet.
 ## NixOS module
 
 Import `inputs.aquarium-monitor.nixosModules.default` into a NixOS host and
-set `services.aquarium-monitor.enable = true`. The module defaults to the
+set `services.aquarium-monitor.enable = true`, `device = "/dev/ttyUSB0"`, and
+`intervalSeconds = 1`. The module defaults to the
 flake's `packages.collector` and writes raw frames to
 `/var/lib/aquarium-monitor/raw-frames.ndjson`; set
 `services.aquarium-monitor.rawLogPath` or `package` to override those values.
+Module evaluation checks the generated device, interval, and `stty` command.
 
-The module is packaging and service plumbing only. A hardware source or a
-long-lived stdin producer must be connected before enabling it in production.
+The module is packaging and service plumbing only. Hardware access permissions
+must be configured by the host.
 
 ## Next recommended milestone
 
-Add a Linux serial transport/configuration for the implemented EZO-EC source and
-connect it to the existing synchronous polling boundary. This is the next
-appropriate step before adding a normalized telemetry database or deployment
+Exercise the serial path on target hardware and validate any additional baud
+rates before adding a normalized telemetry database or deployment.
 integration.

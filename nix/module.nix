@@ -28,9 +28,37 @@ in
         the service's persistent StateDirectory.
       '';
     };
+
+    device = lib.mkOption {
+      type = lib.types.nullOr lib.types.path;
+      default = null;
+      description = "Linux serial device path for an EZO-EC probe.";
+    };
+
+    intervalSeconds = lib.mkOption {
+      type = lib.types.ints.positive;
+      default = 1;
+      description = "Seconds between EZO-EC read requests.";
+    };
+
+    baudRate = lib.mkOption {
+      type = lib.types.ints.positive;
+      default = 9600;
+      description = "Serial baud rate. Only 9600 is currently supported.";
+    };
   };
 
   config = lib.mkIf cfg.enable {
+    assertions = [
+      {
+        assertion = cfg.device != null;
+        message = "services.aquarium-monitor.device must be set for the hardware collector service";
+      }
+      {
+        assertion = cfg.baudRate == 9600;
+        message = "services.aquarium-monitor.baudRate must be 9600; arbitrary baud rates are not supported yet";
+      }
+    ];
     systemd.services.aquarium-monitor = {
       description = "Aquarium Monitor collector";
       wantedBy = [ "multi-user.target" ];
@@ -41,6 +69,25 @@ in
           "${cfg.package}/bin/collector"
           "--raw-log"
           cfg.rawLogPath
+          "--device"
+          cfg.device
+          "--interval-seconds"
+          (toString cfg.intervalSeconds)
+        ];
+        ExecStartPre = lib.escapeShellArgs [
+          "${pkgs.coreutils}/bin/stty"
+          "-F"
+          cfg.device
+          "9600"
+          "raw"
+          "-echo"
+          "-ixon"
+          "-ixoff"
+          "-crtscts"
+          "min"
+          "1"
+          "time"
+          "10"
         ];
         StandardInput = "null";
         Restart = "on-failure";

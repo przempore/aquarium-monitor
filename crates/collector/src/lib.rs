@@ -5,6 +5,9 @@ use std::io::{self, BufRead, Write};
 use std::time::Duration;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
+mod serial;
+pub use serial::SerialTransport;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParseError {
     WrongFieldCount,
@@ -169,6 +172,10 @@ impl<W: Write> NdjsonSink<W> {
     pub fn into_inner(self) -> W {
         self.writer
     }
+
+    pub fn flush(&mut self) -> io::Result<()> {
+        self.writer.flush()
+    }
 }
 
 impl<W: Write> Sink for NdjsonSink<W> {
@@ -306,6 +313,7 @@ pub enum PollError<SourceError, SinkError> {
     Source(SourceError),
     Parse { frame: String, error: ParseError },
     Sink(SinkError),
+    RawLog(io::Error),
 }
 
 impl<SourceError: fmt::Display, SinkError: fmt::Display> fmt::Display
@@ -318,6 +326,7 @@ impl<SourceError: fmt::Display, SinkError: fmt::Display> fmt::Display
                 write!(formatter, "could not parse raw frame {frame:?}: {error}")
             }
             Self::Sink(error) => write!(formatter, "sink error: {error}"),
+            Self::RawLog(error) => write!(formatter, "raw log error: {error}"),
         }
     }
 }
@@ -330,6 +339,7 @@ impl<SourceError: Error + 'static, SinkError: Error + 'static> Error
             Self::Source(error) => Some(error),
             Self::Parse { error, .. } => Some(error),
             Self::Sink(error) => Some(error),
+            Self::RawLog(error) => Some(error),
         }
     }
 }
@@ -422,6 +432,48 @@ where
     K: Sink,
 {
     poll_with_sleep(source, sink, config, std::thread::sleep)
+}
+
+/// Poll a bounded number of frames, persisting each raw frame before parsing.
+/// Source and parse failures are returned in the report so a caller can log
+/// them and continue; sink or raw-log failures stop immediately.
+pub fn poll_with_raw_log<S, K, L, F>(
+    source: &mut S,
+    sink: &mut K,
+    raw_writer: L,
+    config: PollingConfig,
+    mut sleep: F,
+) -> PollingResult<S::Error, K::Error>
+where
+    S: Source,
+    K: Sink,
+    L: Write,
+    F: FnMut(Duration),
+{
+    let mut raw_logger = RawFrameLogger::new(raw_writer);
+    let mut report = PollingReport::default();
+    for attempt in 0..config.attempts {
+        match source.read_frame() {
+            Ok(frame) => {
+                raw_logger.write_frame(&frame).map_err(PollError::RawLog)?;
+                match parse_ec_frame(&frame) {
+                    Ok(sample) => {
+                        sink.write(sample).map_err(PollError::Sink)?;
+                        report.successful_samples += 1;
+                    }
+                    Err(error) => report
+                        .failures
+                        .push(CollectionError::Parse { frame, error }),
+                }
+            }
+            Err(error) => report.failures.push(CollectionError::Source(error)),
+        }
+        if attempt + 1 < config.attempts {
+            sleep(config.interval);
+        }
+    }
+    raw_logger.into_inner().flush().map_err(PollError::RawLog)?;
+    Ok(report)
 }
 
 /// Read and normalize exactly one frame from a source.
@@ -942,6 +994,27 @@ mod tests {
 
         assert_eq!(report.successful_samples, 2);
         assert_eq!(sleeps, vec![Duration::from_millis(25)]);
+    }
+
+    #[test]
+    fn bounded_raw_logged_polling_handles_multiple_samples_without_waiting() {
+        let mut source = SequenceSource(VecDeque::from([
+            Ok("?R,EC,450.00".to_owned()),
+            Ok("malformed".to_owned()),
+            Ok("?R,EC,452.50".to_owned()),
+        ]));
+        let mut sink = RecordingSink {
+            samples: Vec::new(),
+            fail: false,
+        };
+        let mut raw = Vec::new();
+
+        let report = poll_with_raw_log(&mut source, &mut sink, &mut raw, config(3), |_| {})
+            .expect("bounded polling succeeds");
+
+        assert_eq!(report.successful_samples, 2);
+        assert_eq!(report.failures.len(), 1);
+        assert_eq!(raw.iter().filter(|byte| **byte == b'\n').count(), 3);
     }
 
     struct CommonSource(Option<String>);

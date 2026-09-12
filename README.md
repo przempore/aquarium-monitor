@@ -69,13 +69,15 @@ Both are abstracted behind a common `Source` interface.
 
 The transport-neutral EZO-EC request/response source contract is implemented:
 it sends `R\r`, flushes the transport, and reads complete simulator-compatible
-responses. No `/dev/ttyUSB*` transport or configuration is wired yet.
+responses. A synchronous Linux serial transport opens the configured device;
+systemd configures it with `stty` before starting the collector.
 
 ---
 
 ### 2. Collector (Rust)
-The current collector is a synchronous stdin-to-stdout executable. A future
-deployment may run it as a systemd service installed via Nix.
+The collector supports synchronous stdin batch mode and long-lived Linux device
+mode. Device mode requests one frame per interval, logs it before parsing,
+reports source/parse errors on stderr, and emits normalized NDJSON on stdout.
 
 Responsibilities:
 - Poll sensor sources at a fixed interval
@@ -165,6 +167,13 @@ logged separately as NDJSON records containing `timestamp` and `raw_frame`.
 The collector accepts the explicit configuration `--raw-log PATH`; normalized
 NDJSON remains on stdout.
 
+Device mode requires both `--device PATH` and `--interval-seconds N`:
+
+```sh
+nix develop --impure --command cargo run --quiet -p collector -- \
+  --device /dev/ttyUSB0 --interval-seconds 1 --raw-log /tmp/ezo-ec-raw.ndjson
+```
+
 ---
 
 ## Deployment model
@@ -189,6 +198,8 @@ your host configuration:
   imports = [ inputs.aquarium-monitor.nixosModules.default ];
 
   services.aquarium-monitor.enable = true;
+  services.aquarium-monitor.device = "/dev/ttyUSB0";
+  services.aquarium-monitor.intervalSeconds = 1;
   # services.aquarium-monitor.rawLogPath = "/var/lib/aquarium-monitor/raw-frames.ndjson";
 }
 ```
@@ -196,12 +207,13 @@ your host configuration:
 The module persists raw frames at
 `/var/lib/aquarium-monitor/raw-frames.ndjson` by default, starts the collector
 at boot, and restarts it on failure. `services.aquarium-monitor.package` can
-override the flake's `packages.collector` default.
+override the flake's `packages.collector` default. The service uses `stty` in
+`ExecStartPre` and currently supports only 9600 baud. Configure host
+udev/group policy so the service's `DynamicUser` can open the device.
 
-The current collector reads stdin and exits when it receives EOF. The service
-therefore uses `/dev/null` as stdin and will exit immediately on a normal host;
-systemd will not restart a clean exit. A physical sensor source or another
-long-lived stdin producer is still required before production deployment.
+The service uses `/dev/null` as stdin and runs the long-lived device collector.
+Arbitrary baud rates are intentionally rejected until serial configuration is
+validated for this transport.
 
 ---
 
@@ -224,7 +236,7 @@ long-lived stdin producer is still required before production deployment.
       `--raw-log PATH` collector configuration
 - [x] Continuous deterministic simulator mode with configurable interval
 - [x] Transport-neutral EZO-EC request/response source contract
-- [ ] `/dev/ttyUSB*` transport/configuration and long-lived physical source integration
+- [x] Linux serial transport, bounded polling API, and long-lived physical source mode
 - [ ] InfluxDB + Grafana integration
 - [ ] Rule-based alerting
 - [ ] Web UI (Dioxus)
