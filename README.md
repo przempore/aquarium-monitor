@@ -90,7 +90,7 @@ Responsibilities:
 - Normalize to stable domain units:
   - `ec_us_cm`
   - `temp_c`
-- Apply simple rule-based checks (spikes, drift, missing data)
+- Evaluate explicit host-provided rule configuration (thresholds, freshness, and optional spikes)
 - Persist telemetry to InfluxDB
 - Persist every received raw frame, including malformed frames, to a separate
   local NDJSON log for debugging/replay
@@ -155,6 +155,35 @@ InfluxDB is the **single source of truth** for measurements.
 - Alerts work even when no UI is open
 
 Grafana does **not** store measurement history itself.
+
+### Rules engine
+
+The `common::rules::RulesEngine` is a pure, synchronous evaluator for normalized
+`TelemetrySample` values. Hosts must supply all limits; the project intentionally
+has no aquarium-specific threshold defaults. For example:
+
+```rust
+use common::rules::{RulesConfig, RulesEngine, Severity, ThresholdRule};
+use std::time::Duration;
+
+let rules = RulesEngine::new(RulesConfig {
+    ec: Some(ThresholdRule {
+        minimum: Some(100.0), maximum: Some(500.0), severity: Severity::Critical,
+    }),
+    temperature: None,
+    max_age: Some(Duration::from_secs(60)),
+    stale_severity: Severity::Warning,
+    spike: None,
+});
+let alarms = rules.evaluate(&sample, None, now);
+```
+
+Limit equality is allowed; values strictly outside a configured range alarm. A
+configured measurement rule reports a missing field;
+`max_age` reports a sample older than the limit. Invalid-quality samples produce
+no events, and missing values do not produce threshold or spike events. Evaluation
+uses the supplied `now`, has a stable order, and returns `AlarmEvent` values only;
+it is not wired to Grafana or systemd.
 
 ---
 
@@ -340,6 +369,6 @@ paths, Podman storage, image pulls, and secret file ownership on the host.
 - [x] Optional NixOS-managed InfluxDB and Grafana OCI containers
 - [x] Optional Grafana InfluxDB 2.x datasource provisioning without store credentials
 - [ ] InfluxDB + Grafana live integration on target hardware
-- [ ] Rule-based alerting
+- [x] Pure configurable rule-based alarm evaluation
 - [ ] Web UI (Dioxus)
 - [ ] AI-assisted interpretation layer

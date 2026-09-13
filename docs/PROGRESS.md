@@ -44,6 +44,10 @@ replaceable sensor sources, and an optional UI.
   tags, and tests.
 - Optional Grafana InfluxDB 2.x datasource provisioning from a Nix-generated
   read-only file, with the token supplied by a runtime EnvironmentFile.
+- Pure synchronous `common::rules::RulesEngine` with explicit EC and temperature
+  thresholds, freshness checks, optional spikes, and deterministic alarm events.
+  Thresholds and severities must be supplied by the host; no aquarium-specific
+  defaults are provided.
 
 ## Current data flow
 
@@ -53,6 +57,7 @@ EZO-EC simulator or stdin
         +-> RawFrameLogger -> local raw NDJSON log
         +-> strict EZO-EC parser
         -> TelemetrySample
+         -> RulesEngine (host-provided configuration)
          -> InfluxDbSink (hardware mode)
          -> NdjsonSink (stdin/demo mode)
 ```
@@ -91,7 +96,9 @@ collector has no signal handling yet.
   source or the Nix store.
 - The NixOS service requires `tankId` and `device`, uses `/dev/null` as stdin, and needs host
   udev/group policy to grant its `DynamicUser` access to the serial device.
-- No rules, alarms, or trend analysis.
+- The rules engine is not wired into collector polling, Grafana, or systemd yet;
+  callers must invoke it explicitly and route returned events themselves.
+- No drift or trend analysis.
 - No Grafana dashboards.
 - No UI.
 - No AI-assisted interpretation.
@@ -173,6 +180,25 @@ existing `sops-nix` workflow. The module does not contain credentials, loads
 the collector token through a systemd credential, and passes the Grafana token
 through `INFLUXDB_TOKEN` in its runtime EnvironmentFile. The generated Grafana
 provisioning file is mounted read-only and contains no token value.
+
+## Rules configuration
+
+`common::rules::RulesConfig` has optional EC and temperature `ThresholdRule`
+values, an optional `max_age`, severities for threshold/missing and stale events,
+and an optional `SpikeRule` with absolute and/or relative limits. Hosts must
+provide these values explicitly. Threshold comparisons alarm strictly outside
+the configured range; spike limits alarm when reached. Missing fields are
+reported only when their measurement rule is configured; they do not create
+threshold or spike alarms. Samples with
+`Quality::Invalid` produce no alarms. A stale sample is older than `max_age`,
+and a future-dated sample is not stale. `AlarmEvent.timestamp` is the sample
+timestamp and `observed_value` is `None` for missing/stale events.
+
+Evaluation order is deterministic: stale, EC thresholds, temperature thresholds,
+then EC and temperature spikes. Spikes require same-tank, valid previous and
+current values; absolute or relative limits can trigger them. Relative change
+is absolute delta divided by the absolute previous value, and is unavailable
+when the previous value is zero.
 
 ## Next recommended milestone
 

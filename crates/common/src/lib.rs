@@ -3,6 +3,7 @@ use std::error::Error;
 use time::OffsetDateTime;
 
 pub mod influxdb;
+pub mod rules;
 
 /// A synchronous source of complete raw sensor frames.
 pub trait Source {
