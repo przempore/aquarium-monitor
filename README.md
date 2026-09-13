@@ -308,6 +308,7 @@ your host configuration:
       enable = true;
       tokenEnvironmentFile = config.sops.secrets."aquarium-monitor/grafana-influxdb-token".path;
     };
+    dashboard.enable = true;
   };
 }
 ```
@@ -321,11 +322,20 @@ sops.secrets."aquarium-monitor/grafana-influxdb-token" = { mode = "0400"; };
 ```
 
 The Grafana secret must be an EnvironmentFile containing
-`INFLUXDB_TOKEN=<the same admin token>`. Datasource provisioning is opt-in and
-creates no dashboards. The generated datasource file contains only the
-`${INFLUXDB_TOKEN}` placeholder; the secret is supplied to the container at
-runtime and is not placed in the Nix store. Grafana reaches InfluxDB through
-Podman's local host gateway at `host.containers.internal`.
+`INFLUXDB_TOKEN=<the same admin token>`. Datasource provisioning is opt-in.
+The generic dashboard is separately opt-in with `dashboard.enable = true`; it
+requires Grafana, InfluxDB, and datasource provisioning to be enabled. The
+generated datasource file contains only the `${INFLUXDB_TOKEN}` placeholder;
+the secret is supplied to the container at runtime and is not placed in the
+Nix store. The dashboard and its Grafana file-provider configuration are also
+generated with `pkgs.writeText` and mounted read-only. Grafana reaches InfluxDB
+through Podman's local host gateway at `host.containers.internal`.
+
+The dashboard shows generic EC and temperature time series, current-value stat
+panels, and a `tank_id` selector populated from InfluxDB. It uses the stable
+datasource UID `aquarium-influxdb`, the `aquarium_telemetry` measurement, and
+the `ec_us_cm` and `temp_c` fields; it does not contain tank IDs or alarm
+thresholds. Alarm NDJSON is not visualized by this dashboard yet.
 
 The repository module remains secret-provider agnostic; `sops-nix` supplies the
 runtime paths. The collector receives its token through a systemd credential,
@@ -378,6 +388,7 @@ paths, Podman storage, image pulls, and secret file ownership on the host.
 - [x] InfluxDB 2.x device-mode sink with protected token-file configuration
 - [x] Optional NixOS-managed InfluxDB and Grafana OCI containers
 - [x] Optional Grafana InfluxDB 2.x datasource provisioning without store credentials
+- [x] Opt-in generic Grafana telemetry dashboard provisioning
 - [ ] InfluxDB + Grafana live integration on target hardware
 - [x] Pure configurable rule-based alarm evaluation
 - [ ] Web UI (Dioxus)

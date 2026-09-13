@@ -1,6 +1,10 @@
 { nixpkgs, pkgs, module }:
 
 let
+  evaluatedDisabled = nixpkgs.lib.nixosSystem {
+    inherit (pkgs) system;
+    modules = [ module ];
+  };
   evaluated = nixpkgs.lib.nixosSystem {
     inherit (pkgs) system;
     modules = [
@@ -15,17 +19,23 @@ let
          services.aquarium-monitor.influxdb.environmentFile = "/run/keys/influxdb-environment";
           services.aquarium-monitor.influxdb.tokenFile = "/run/keys/influxdb-token";
           services.aquarium-monitor.grafana.enable = true;
-          services.aquarium-monitor.grafana.provisioning = {
+         services.aquarium-monitor.grafana.provisioning = {
             enable = true;
             tokenEnvironmentFile = "/run/keys/grafana-influxdb-token-environment";
           };
-       }
-      ];
-  };
+          services.aquarium-monitor.grafana.dashboard.enable = true;
+        }
+       ];
+   };
   service = evaluated.config.systemd.services.aquarium-monitor;
   grafanaVolumes = evaluated.config.virtualisation.oci-containers.containers.grafana.volumes;
   datasourceVolume = builtins.head (builtins.filter (volume: builtins.match ".*aquarium-monitor-grafana-datasource.yml.*" volume != null) grafanaVolumes);
+  dashboardProviderVolume = builtins.head (builtins.filter (volume: builtins.match ".*dashboard-provider.yml.*" volume != null) grafanaVolumes);
+  dashboardVolume = builtins.head (builtins.filter (volume: builtins.match ".*aquarium-monitor-grafana-dashboard.json.*" volume != null) grafanaVolumes);
+  dashboard = builtins.fromJSON (builtins.readFile (builtins.head (pkgs.lib.splitString ":" dashboardVolume)));
 in
+assert !evaluatedDisabled.config.services.aquarium-monitor.grafana.dashboard.enable;
+assert !(builtins.hasAttr "grafana" evaluatedDisabled.config.virtualisation.oci-containers.containers);
 assert service.serviceConfig.StandardInput == "null";
 assert builtins.match ".*--device.*" service.serviceConfig.ExecStart != null;
 assert builtins.match ".*--tank-id tank-1.*" service.serviceConfig.ExecStart != null;
@@ -37,11 +47,19 @@ assert builtins.match ".*secret.*" service.serviceConfig.ExecStart == null;
 assert builtins.match ".*stty.*9600.*" service.serviceConfig.ExecStartPre != null;
 assert service.serviceConfig.Restart == "on-failure";
 assert evaluated.config.virtualisation.oci-containers.containers.influxdb.ports == [ "127.0.0.1:8086:8086" ];
-  assert evaluated.config.virtualisation.oci-containers.containers.grafana.ports == [ "127.0.0.1:3000:3000" ];
-  assert builtins.substring 0 11 (builtins.head (builtins.filter (volume: builtins.match ".*:ro" volume != null) grafanaVolumes)) == "/nix/store/";
-  assert builtins.match ".*:/etc/grafana/provisioning/datasources/aquarium-monitor.yml:ro" datasourceVolume != null;
-  assert evaluated.config.virtualisation.oci-containers.containers.grafana.environmentFiles == [ "/run/keys/grafana-influxdb-token-environment" ];
-  assert builtins.match ".*INFLUXDB_TOKEN.*" (builtins.readFile (builtins.head (pkgs.lib.splitString ":" datasourceVolume))) != null;
-  assert builtins.match ".*test-token.*" (builtins.readFile (builtins.head (pkgs.lib.splitString ":" datasourceVolume))) == null;
-  assert evaluated.config.virtualisation.oci-containers.containers.influxdb.environmentFiles == [ "/run/keys/influxdb-environment" ];
+assert evaluated.config.virtualisation.oci-containers.containers.grafana.ports == [ "127.0.0.1:3000:3000" ];
+assert builtins.match ".*:/etc/grafana/provisioning/datasources/aquarium-monitor.yml:ro" datasourceVolume != null;
+assert builtins.match ".*:/etc/grafana/provisioning/dashboards/aquarium-monitor.yml:ro" dashboardProviderVolume != null;
+assert builtins.match ".*:/etc/grafana/provisioning/dashboards/aquarium-monitor.json:ro" dashboardVolume != null;
+assert builtins.substring 0 11 (builtins.head (builtins.filter (volume: builtins.match ".*:ro" volume != null) grafanaVolumes)) == "/nix/store/";
+assert evaluated.config.virtualisation.oci-containers.containers.grafana.environmentFiles == [ "/run/keys/grafana-influxdb-token-environment" ];
+assert builtins.match ".*INFLUXDB_TOKEN.*" (builtins.readFile (builtins.head (pkgs.lib.splitString ":" datasourceVolume))) != null;
+assert builtins.match ".*test-token.*" (builtins.readFile (builtins.head (pkgs.lib.splitString ":" datasourceVolume))) == null;
+assert builtins.match ".*uid: aquarium-influxdb.*" (builtins.readFile (builtins.head (pkgs.lib.splitString ":" datasourceVolume))) != null;
+assert dashboard.uid == "aquarium-monitor";
+assert builtins.length dashboard.panels == 4;
+assert builtins.match ".*tank_id.*" (builtins.readFile (builtins.head (pkgs.lib.splitString ":" dashboardVolume))) != null;
+assert builtins.match ".*ec_us_cm.*" (builtins.readFile (builtins.head (pkgs.lib.splitString ":" dashboardVolume))) != null;
+assert builtins.match ".*temp_c.*" (builtins.readFile (builtins.head (pkgs.lib.splitString ":" dashboardVolume))) != null;
+assert evaluated.config.virtualisation.oci-containers.containers.influxdb.environmentFiles == [ "/run/keys/influxdb-environment" ];
 pkgs.runCommand "aquarium-monitor-module-evaluation" { } "touch $out"

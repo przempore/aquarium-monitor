@@ -44,6 +44,10 @@ replaceable sensor sources, and an optional UI.
   tags, and tests.
 - Optional Grafana InfluxDB 2.x datasource provisioning from a Nix-generated
   read-only file, with the token supplied by a runtime EnvironmentFile.
+- Opt-in generic Grafana dashboard provisioning from Nix-generated read-only
+  JSON and a Grafana 11 file provider. It includes EC and temperature series,
+  current-value stats, and a `tank_id` variable without baked-in IDs or alarm
+  thresholds.
 - Pure synchronous `common::rules::RulesEngine` with explicit EC and temperature
   thresholds, freshness checks, optional spikes, and deterministic alarm events.
   Thresholds and severities must be supplied by the host; no aquarium-specific
@@ -103,7 +107,7 @@ collector has no signal handling yet.
   than silently discarding an event. Alarms are not sent to Grafana or cloud
   services.
 - No drift or trend analysis.
-- No Grafana dashboards.
+- The generic Grafana dashboard does not visualize alarm NDJSON yet.
 - No UI.
 - No AI-assisted interpretation.
 - Raw frames are persisted locally as NDJSON; rejected frames are also reported
@@ -177,13 +181,20 @@ default local ports are InfluxDB `127.0.0.1:8086` and Grafana `127.0.0.1:3000`;
 both containers are disabled unless explicitly enabled. Host validation remains
 required for hardware, Podman, directory ownership, and image availability.
 
+Set `services.aquarium-monitor.grafana.dashboard.enable = true` in addition to
+`grafana.enable`, `influxdb.enable`, and
+`grafana.provisioning.enable` to provision the generic dashboard. The module
+asserts those dependencies. It is intentionally not tied to the host's
+`tankId`; select one or more tanks using the dashboard's `tank_id` variable.
+
 ## Secret management
 
 The NixOS module accepts secret file paths so host configurations can use the
 existing `sops-nix` workflow. The module does not contain credentials, loads
 the collector token through a systemd credential, and passes the Grafana token
 through `INFLUXDB_TOKEN` in its runtime EnvironmentFile. The generated Grafana
-provisioning file is mounted read-only and contains no token value.
+provisioning files are mounted read-only and contain no token value. Alarm
+NDJSON is not visualized by the dashboard yet.
 
 ## Rules configuration
 
@@ -213,5 +224,6 @@ and the previous valid sample for the same tank.
 ## Next recommended milestone
 
 Exercise the serial path and OCI services on the target host, then validate the
-provisioned Grafana datasource and InfluxDB retention settings. Dashboards are
-not provisioned yet.
+provisioned Grafana datasource, dashboard queries, and InfluxDB retention
+settings. Alarm NDJSON visualization and Grafana alert integration remain
+future work.

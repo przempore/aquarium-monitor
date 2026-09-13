@@ -8,6 +8,7 @@ let
 
     datasources:
       - name: Aquarium InfluxDB
+        uid: aquarium-influxdb
         type: influxdb
         access: proxy
         url: http://host.containers.internal:${toString cfg.influxdb.port}
@@ -18,6 +19,86 @@ let
           tlsSkipVerify: false
         secureJsonData:
           token: ''${INFLUXDB_TOKEN}
+  '';
+  grafanaDashboardProvider = pkgs.writeText "aquarium-monitor-grafana-dashboard-provider.yml" ''
+    apiVersion: 1
+
+    providers:
+      - name: Aquarium Monitor
+        type: file
+        disableDeletion: true
+        editable: false
+        options:
+          path: /etc/grafana/provisioning/dashboards
+  '';
+  grafanaDashboard = pkgs.writeText "aquarium-monitor-grafana-dashboard.json" ''
+    {
+      "id": null,
+      "uid": "aquarium-monitor",
+      "title": "Aquarium Monitor",
+      "tags": ["aquarium", "telemetry"],
+      "timezone": "browser",
+      "schemaVersion": 39,
+      "version": 1,
+      "refresh": "30s",
+      "time": {"from": "now-24h", "to": "now"},
+      "templating": {
+        "list": [
+          {
+            "name": "tank_id",
+            "label": "Tank",
+            "type": "query",
+            "datasource": {"type": "influxdb", "uid": "aquarium-influxdb"},
+            "query": "import \"influxdata/influxdb/schema\"\nschema.tagValues(bucket: v.defaultBucket, tag: \"tank_id\", predicate: (r) => r._measurement == \"aquarium_telemetry\")",
+            "refresh": 1,
+            "includeAll": true,
+            "multi": true,
+            "allValue": ".*",
+            "current": {"selected": true, "text": "All", "value": ["$__all"]},
+            "sort": 1
+          }
+        ]
+      },
+      "panels": [
+        {
+          "id": 1,
+          "type": "timeseries",
+          "title": "Electrical conductivity",
+          "description": "Mean EC in microsiemens per centimetre.",
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+          "fieldConfig": {"defaults": {"unit": "us", "color": {"mode": "palette-classic"}}, "overrides": []},
+          "targets": [{"refId": "A", "queryType": "0", "datasource": {"type": "influxdb", "uid": "aquarium-influxdb"}, "query": "from(bucket: v.defaultBucket)\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"aquarium_telemetry\")\n  |> filter(fn: (r) => r._field == \"ec_us_cm\")\n  |> filter(fn: (r) => r.tank_id =~ /^''${tank_id:regex}$/)\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")"}],
+          "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}}
+        },
+        {
+          "id": 2,
+          "type": "timeseries",
+          "title": "Temperature",
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+          "fieldConfig": {"defaults": {"unit": "celsius", "color": {"mode": "palette-classic"}}, "overrides": []},
+          "targets": [{"refId": "A", "queryType": "0", "datasource": {"type": "influxdb", "uid": "aquarium-influxdb"}, "query": "from(bucket: v.defaultBucket)\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"aquarium_telemetry\")\n  |> filter(fn: (r) => r._field == \"temp_c\")\n  |> filter(fn: (r) => r.tank_id =~ /^''${tank_id:regex}$/)\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")"}],
+          "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}}
+        },
+        {
+          "id": 3,
+          "type": "stat",
+          "title": "Current EC",
+          "gridPos": {"h": 5, "w": 6, "x": 0, "y": 8},
+          "fieldConfig": {"defaults": {"unit": "us", "decimals": 1}, "overrides": []},
+          "targets": [{"refId": "A", "queryType": "0", "datasource": {"type": "influxdb", "uid": "aquarium-influxdb"}, "query": "from(bucket: v.defaultBucket)\n  |> range(start: -30d)\n  |> filter(fn: (r) => r._measurement == \"aquarium_telemetry\")\n  |> filter(fn: (r) => r._field == \"ec_us_cm\")\n  |> filter(fn: (r) => r.tank_id =~ /^''${tank_id:regex}$/)\n  |> last()"}],
+          "options": {"reduceOptions": {"values": false, "calcs": ["lastNotNull"], "fields": ""}, "orientation": "auto", "textMode": "auto", "colorMode": "value", "graphMode": "area", "justifyMode": "auto"}
+        },
+        {
+          "id": 4,
+          "type": "stat",
+          "title": "Current temperature",
+          "gridPos": {"h": 5, "w": 6, "x": 6, "y": 8},
+          "fieldConfig": {"defaults": {"unit": "celsius", "decimals": 1}, "overrides": []},
+          "targets": [{"refId": "A", "queryType": "0", "datasource": {"type": "influxdb", "uid": "aquarium-influxdb"}, "query": "from(bucket: v.defaultBucket)\n  |> range(start: -30d)\n  |> filter(fn: (r) => r._measurement == \"aquarium_telemetry\")\n  |> filter(fn: (r) => r._field == \"temp_c\")\n  |> filter(fn: (r) => r.tank_id =~ /^''${tank_id:regex}$/)\n  |> last()"}],
+          "options": {"reduceOptions": {"values": false, "calcs": ["lastNotNull"], "fields": ""}, "orientation": "auto", "textMode": "auto", "colorMode": "value", "graphMode": "area", "justifyMode": "auto"}
+        }
+      ]
+    }
   '';
 in
 {
@@ -130,6 +211,9 @@ in
           '';
         };
       };
+      dashboard = {
+        enable = lib.mkEnableOption "a generic Aquarium Monitor Grafana dashboard";
+      };
     };
   };
 
@@ -172,11 +256,31 @@ in
         ports = [ "127.0.0.1:${toString cfg.grafana.port}:3000" ];
         volumes = [ "${cfg.grafana.dataDir}:/var/lib/grafana" ]
           ++ lib.optional cfg.grafana.provisioning.enable
-            "${grafanaDatasourceProvisioning}:/etc/grafana/provisioning/datasources/aquarium-monitor.yml:ro";
+            "${grafanaDatasourceProvisioning}:/etc/grafana/provisioning/datasources/aquarium-monitor.yml:ro"
+          ++ lib.optionals cfg.grafana.dashboard.enable [
+            "${grafanaDashboardProvider}:/etc/grafana/provisioning/dashboards/aquarium-monitor.yml:ro"
+            "${grafanaDashboard}:/etc/grafana/provisioning/dashboards/aquarium-monitor.json:ro"
+          ];
         environmentFiles = lib.optional cfg.grafana.provisioning.enable cfg.grafana.provisioning.tokenEnvironmentFile;
         dependsOn = lib.optional cfg.influxdb.enable "influxdb";
         extraOptions = [ "--pull=missing" "--restart=on-failure" ];
       };
+    })
+    (lib.mkIf cfg.grafana.dashboard.enable {
+      assertions = [
+        {
+          assertion = cfg.grafana.enable;
+          message = "services.aquarium-monitor.grafana.dashboard.enable requires Grafana to be enabled";
+        }
+        {
+          assertion = cfg.influxdb.enable;
+          message = "services.aquarium-monitor.grafana.dashboard.enable requires InfluxDB to be enabled";
+        }
+        {
+          assertion = cfg.grafana.provisioning.enable;
+          message = "services.aquarium-monitor.grafana.dashboard.enable requires Grafana datasource provisioning to be enabled";
+        }
+      ];
     })
     (lib.mkIf cfg.enable {
       assertions = [
