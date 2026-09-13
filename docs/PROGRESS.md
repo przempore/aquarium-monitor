@@ -48,6 +48,8 @@ replaceable sensor sources, and an optional UI.
   thresholds, freshness checks, optional spikes, and deterministic alarm events.
   Thresholds and severities must be supplied by the host; no aquarium-specific
   defaults are provided.
+- Collector runtime integration for stdin and hardware modes, with explicit
+  CLI/NixOS rule configuration and opt-in local/stderr alarm NDJSON output.
 
 ## Current data flow
 
@@ -96,8 +98,10 @@ collector has no signal handling yet.
   source or the Nix store.
 - The NixOS service requires `tankId` and `device`, uses `/dev/null` as stdin, and needs host
   udev/group policy to grant its `DynamicUser` access to the serial device.
-- The rules engine is not wired into collector polling, Grafana, or systemd yet;
-  callers must invoke it explicitly and route returned events themselves.
+- Alarm output is local only: a file is append-only, while `stderr` is suitable
+  for journald. An alarm output write or flush failure stops collection rather
+  than silently discarding an event. Alarms are not sent to Grafana or cloud
+  services.
 - No drift or trend analysis.
 - No Grafana dashboards.
 - No UI.
@@ -199,6 +203,12 @@ then EC and temperature spikes. Spikes require same-tank, valid previous and
 current values; absolute or relative limits can trigger them. Relative change
 is absolute delta divided by the absolute previous value, and is unavailable
 when the previous value is zero.
+
+The collector exposes these settings through the threshold, freshness, spike,
+severity, and `--alarm-output PATH|stderr` options. Rules are disabled unless at
+least one rule option is configured, and configured rules require an alarm
+destination. Each normalized sample is evaluated with an explicit current time
+and the previous valid sample for the same tank.
 
 ## Next recommended milestone
 

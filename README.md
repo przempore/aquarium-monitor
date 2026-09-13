@@ -182,8 +182,18 @@ Limit equality is allowed; values strictly outside a configured range alarm. A
 configured measurement rule reports a missing field;
 `max_age` reports a sample older than the limit. Invalid-quality samples produce
 no events, and missing values do not produce threshold or spike events. Evaluation
-uses the supplied `now`, has a stable order, and returns `AlarmEvent` values only;
-it is not wired to Grafana or systemd.
+uses the supplied `now`, has a stable order, and returns `AlarmEvent` values only.
+The collector wires this evaluator into both stdin and hardware paths only when
+rule options are supplied. Alarms are emitted as JSON/NDJSON to an explicitly
+configured local append-only file or to `stderr` (journald under systemd).
+Alarm output failures stop collection; no thresholds or severities are enabled
+by default.
+
+The CLI options are `--ec-min`, `--ec-max`, `--ec-severity`, `--temperature-min`,
+`--temperature-max`, `--temperature-severity`, `--max-age-seconds`,
+`--stale-severity`, `--spike-absolute`, `--spike-relative`, and
+`--spike-severity`. Rule options require `--alarm-output PATH|stderr`. The NixOS
+module exposes corresponding camelCase options.
 
 ---
 

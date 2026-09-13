@@ -64,6 +64,24 @@ in
       description = "Seconds between EZO-EC read requests.";
     };
 
+    alarmOutput = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      description = "Optional alarm NDJSON destination: a local append-only path or the literal stderr (journald).";
+    };
+
+    ecMinimum = lib.mkOption { type = lib.types.nullOr lib.types.float; default = null; description = "Optional EC lower limit."; };
+    ecMaximum = lib.mkOption { type = lib.types.nullOr lib.types.float; default = null; description = "Optional EC upper limit."; };
+    ecSeverity = lib.mkOption { type = lib.types.nullOr (lib.types.enum [ "warning" "critical" ]); default = null; description = "Severity for configured EC limits and missing EC."; };
+    temperatureMinimum = lib.mkOption { type = lib.types.nullOr lib.types.float; default = null; description = "Optional temperature lower limit in degrees Celsius."; };
+    temperatureMaximum = lib.mkOption { type = lib.types.nullOr lib.types.float; default = null; description = "Optional temperature upper limit in degrees Celsius."; };
+    temperatureSeverity = lib.mkOption { type = lib.types.nullOr (lib.types.enum [ "warning" "critical" ]); default = null; description = "Severity for configured temperature limits and missing temperature."; };
+    maxAgeSeconds = lib.mkOption { type = lib.types.nullOr lib.types.ints.positive; default = null; description = "Optional maximum sample age."; };
+    staleSeverity = lib.mkOption { type = lib.types.nullOr (lib.types.enum [ "warning" "critical" ]); default = null; description = "Severity for stale samples."; };
+    spikeAbsolute = lib.mkOption { type = lib.types.nullOr lib.types.float; default = null; description = "Optional absolute EC/temperature spike limit."; };
+    spikeRelative = lib.mkOption { type = lib.types.nullOr lib.types.float; default = null; description = "Optional relative EC/temperature spike limit as a ratio."; };
+    spikeSeverity = lib.mkOption { type = lib.types.nullOr (lib.types.enum [ "warning" "critical" ]); default = null; description = "Severity for configured spikes."; };
+
     baudRate = lib.mkOption {
       type = lib.types.ints.positive;
       default = 9600;
@@ -183,6 +201,7 @@ in
             "--device" cfg.device "--temperature-path" cfg.temperaturePath
             "--tank-id" cfg.tankId
             "--interval-seconds" (toString cfg.intervalSeconds)
+          ] ++ lib.optionals (cfg.alarmOutput != null) [ "--alarm-output" cfg.alarmOutput ] ++ lib.optionals (cfg.ecMinimum != null) [ "--ec-min" (toString cfg.ecMinimum) ] ++ lib.optionals (cfg.ecMaximum != null) [ "--ec-max" (toString cfg.ecMaximum) ] ++ lib.optionals (cfg.ecSeverity != null) [ "--ec-severity" cfg.ecSeverity ] ++ lib.optionals (cfg.temperatureMinimum != null) [ "--temperature-min" (toString cfg.temperatureMinimum) ] ++ lib.optionals (cfg.temperatureMaximum != null) [ "--temperature-max" (toString cfg.temperatureMaximum) ] ++ lib.optionals (cfg.temperatureSeverity != null) [ "--temperature-severity" cfg.temperatureSeverity ] ++ lib.optionals (cfg.maxAgeSeconds != null) [ "--max-age-seconds" (toString cfg.maxAgeSeconds) ] ++ lib.optionals (cfg.staleSeverity != null) [ "--stale-severity" cfg.staleSeverity ] ++ lib.optionals (cfg.spikeAbsolute != null) [ "--spike-absolute" (toString cfg.spikeAbsolute) ] ++ lib.optionals (cfg.spikeRelative != null) [ "--spike-relative" (toString cfg.spikeRelative) ] ++ lib.optionals (cfg.spikeSeverity != null) [ "--spike-severity" cfg.spikeSeverity
           ] ++ lib.optionals cfg.influxdb.enable [
             "--influx-url" "http://127.0.0.1:${toString cfg.influxdb.port}"
             "--influx-organization" cfg.influxdb.organization

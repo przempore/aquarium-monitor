@@ -3,9 +3,11 @@ use std::time::Duration;
 use time::OffsetDateTime;
 
 /// Severity assigned by the host to a rule violation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum Severity {
+    #[serde(rename = "warning")]
     Warning,
+    #[serde(rename = "critical")]
     Critical,
 }
 
@@ -142,7 +144,7 @@ impl RulesEngine {
 }
 
 /// A rule violation emitted by [`RulesEngine`].
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct AlarmEvent {
     pub tank_id: String,
     pub rule_id: String,
