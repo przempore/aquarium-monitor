@@ -166,7 +166,7 @@ pub fn encode_line_protocol(sample: &TelemetrySample) -> Result<String, LineProt
         return Err(LineProtocolError::InvalidFieldValue("temp_c"));
     }
     let mut line = format!(
-        "{} tank_id={} source={} quality={}",
+        "{},tank_id={},source={},quality={}",
         MEASUREMENT,
         tag_value(&sample.tank_id),
         tag_value(&sample.source.to_string()),
@@ -371,7 +371,7 @@ mod tests {
         let line = encode_line_protocol(&sample(Some(450.0), Some(26.187))).unwrap();
         assert_eq!(
             line,
-            "aquarium_telemetry tank_id=tank\\,\\ west\\ \\=\\\\zone source=hardware quality=ok ec_us_cm=450,temp_c=26.187 1234567890123456789"
+            "aquarium_telemetry,tank_id=tank\\,\\ west\\ \\=\\\\zone,source=hardware,quality=ok ec_us_cm=450,temp_c=26.187 1234567890123456789"
         );
     }
 
@@ -379,11 +379,11 @@ mod tests {
     fn absent_fields_are_not_emitted() {
         assert_eq!(
             encode_line_protocol(&sample(Some(450.0), None)).unwrap(),
-            "aquarium_telemetry tank_id=tank\\,\\ west\\ \\=\\\\zone source=hardware quality=ok ec_us_cm=450 1234567890123456789"
+            "aquarium_telemetry,tank_id=tank\\,\\ west\\ \\=\\\\zone,source=hardware,quality=ok ec_us_cm=450 1234567890123456789"
         );
         assert_eq!(
             encode_line_protocol(&sample(None, Some(26.187))).unwrap(),
-            "aquarium_telemetry tank_id=tank\\,\\ west\\ \\=\\\\zone source=hardware quality=ok temp_c=26.187 1234567890123456789"
+            "aquarium_telemetry,tank_id=tank\\,\\ west\\ \\=\\\\zone,source=hardware,quality=ok temp_c=26.187 1234567890123456789"
         );
     }
     #[test]
