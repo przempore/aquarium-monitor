@@ -81,8 +81,10 @@ systemd configures it with `stty` before starting the collector.
 The collector supports synchronous stdin batch mode and long-lived Linux device
 mode. Device mode requests one frame per interval, logs it before parsing, and
 reports source/parse errors on stderr. With explicit InfluxDB options it writes
-normalized combined samples to InfluxDB; otherwise it retains normalized NDJSON
-on stdout. Stdin mode is unchanged.
+normalized samples to InfluxDB in either mode; otherwise stdin retains normalized
+NDJSON on stdout. Stdin uses `stdin-demo` as its tank identity unless
+`--tank-id ID` is supplied. No normalized data is stored in InfluxDB until the
+simulator-to-Influx command below is run.
 
 Responsibilities:
 - Poll sensor sources at a fixed interval
@@ -115,6 +117,21 @@ nix develop --impure --command sh -c \
    cargo run --quiet -p collector -- --raw-log raw-frames.ndjson'
 ```
 
+To write that simulator stream to a local InfluxDB instance, create a token
+file first, then run:
+
+```sh
+nix develop --impure --command sh -c \
+  'cargo run --quiet -p simulator-ezo-ec -- --continuous | \
+   cargo run --quiet -p collector -- --raw-log raw-frames.ndjson \
+     --tank-id tank-sim --influx-url http://127.0.0.1:8086 \
+     --influx-organization aquarium --influx-bucket telemetry \
+     --influx-token-file /run/keys/influx-token'
+```
+
+The token file is required and should contain only the InfluxDB token. Stop the
+simulator to close the pipe; the collector then finishes after receiving EOF.
+
 Use `--interval-seconds N` with `--continuous` to choose a positive interval.
 The collector still reads stdin until EOF and has no signal handling yet. Stop
 the simulator to close the pipe; the collector then finishes after receiving
@@ -128,8 +145,9 @@ EOF.
 - Retention and downsampling handled natively
 - Queried by Grafana
 
-The synchronous InfluxDB 2.x sink is selected by hardware mode and requires
-explicit `url`, `organization`, `bucket`, and token-file configuration. The
+The synchronous InfluxDB 2.x sink is selected when all four options are
+provided in either hardware or stdin mode and requires explicit `url`,
+`organization`, `bucket`, and token-file configuration. The
 collector reads the token from a protected file at startup, removes only its
 final newline, and never logs or passes the token as a command-line argument.
 It writes:

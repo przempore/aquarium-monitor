@@ -39,7 +39,7 @@ fn main() -> io::Result<()> {
         let mut sink = match config.influx {
             Some(influx) => {
                 let token = read_token_file(&influx.token_file)?;
-                DeviceSink::Influx(
+                TelemetrySink::Influx(
                     InfluxDbSink::new(
                         InfluxDbConfig::new(influx.url, influx.organization, influx.bucket, token),
                         StdHttpTransport,
@@ -49,7 +49,7 @@ fn main() -> io::Result<()> {
                     })?,
                 )
             }
-            None => DeviceSink::Ndjson(NdjsonSink::new(BufWriter::new(io::stdout()))),
+            None => TelemetrySink::Ndjson(NdjsonSink::new(BufWriter::new(io::stdout()))),
         };
         let mut raw_logger = collector::RawFrameLogger::new(BufWriter::new(&raw_file));
         let mut runtime = RuleRuntime::new(rules, alarm_output.take());
@@ -96,11 +96,27 @@ fn main() -> io::Result<()> {
             sink.flush()?;
             std::thread::sleep(config.interval);
         }
-    } else if rules.is_some() {
+    } else if config.influx.is_some() || rules.is_some() {
+        let sink = match config.influx {
+            Some(influx) => {
+                let token = read_token_file(&influx.token_file)?;
+                TelemetrySink::Influx(
+                    InfluxDbSink::new(
+                        InfluxDbConfig::new(influx.url, influx.organization, influx.bucket, token),
+                        StdHttpTransport,
+                    )
+                    .map_err(|error| {
+                        io::Error::new(io::ErrorKind::InvalidInput, error.to_string())
+                    })?,
+                )
+            }
+            None => TelemetrySink::Ndjson(NdjsonSink::new(BufWriter::new(io::stdout().lock()))),
+        };
         collect_stdin_with_rules(
             io::stdin().lock(),
-            BufWriter::new(io::stdout().lock()),
             raw_file,
+            sink,
+            config.tank_id.as_deref().unwrap_or("stdin-demo"),
             RuleRuntime::new(rules, alarm_output),
         )
         .map(|_| ())
@@ -116,17 +132,17 @@ fn main() -> io::Result<()> {
 
 fn collect_stdin_with_rules<R: BufRead, W: Write>(
     reader: R,
-    writer: W,
     raw_file: std::fs::File,
+    mut sink: TelemetrySink<W>,
+    tank_id: &str,
     mut runtime: RuleRuntime,
 ) -> io::Result<usize> {
     let mut source = StdinSource::new(reader);
-    let mut sink = NdjsonSink::new(writer);
     let mut raw_logger = RawFrameLogger::new(BufWriter::new(raw_file));
     let mut successful_samples = 0;
     while let Some(frame) = source.read_frame_or_eof()? {
         raw_logger.write_frame(&frame)?;
-        match parse_ec_frame_for_tank("stdin-demo", &frame) {
+        match parse_ec_frame_for_tank(tank_id, &frame) {
             Ok(sample) => {
                 runtime.process(sample, &mut sink)?;
                 successful_samples += 1;
@@ -134,7 +150,7 @@ fn collect_stdin_with_rules<R: BufRead, W: Write>(
             Err(error) => eprintln!("collector rejected raw frame {frame:?}: {error}"),
         }
     }
-    sink.into_inner().flush()?;
+    sink.flush()?;
     raw_logger.into_inner().flush()?;
     runtime.flush()?;
     Ok(successful_samples)
@@ -365,11 +381,6 @@ impl Config {
                 "--influx-url, --influx-organization, --influx-bucket, and --influx-token-file must be provided together",
             ));
         }
-        if device.is_none() && influx_values.iter().any(|present| *present) {
-            return Err(invalid_arguments(
-                "InfluxDB options require --device hardware mode",
-            ));
-        }
         Ok(Self {
             raw_log,
             tank_id,
@@ -519,12 +530,12 @@ fn read_token_file(path: &std::path::Path) -> io::Result<String> {
     Ok(token.to_owned())
 }
 
-enum DeviceSink {
+enum TelemetrySink<W> {
     Influx(InfluxDbSink<StdHttpTransport>),
-    Ndjson(NdjsonSink<BufWriter<io::Stdout>>),
+    Ndjson(NdjsonSink<W>),
 }
 
-impl Sink for DeviceSink {
+impl<W: Write> Sink for TelemetrySink<W> {
     type Error = io::Error;
 
     fn write(&mut self, sample: common::TelemetrySample) -> Result<(), Self::Error> {
@@ -537,7 +548,7 @@ impl Sink for DeviceSink {
     }
 }
 
-impl DeviceSink {
+impl<W: Write> TelemetrySink<W> {
     fn flush(&mut self) -> io::Result<()> {
         match self {
             Self::Influx(_) => Ok(()),
@@ -616,6 +627,12 @@ mod tests {
                 "--interval-seconds".to_owned(),
                 "1".to_owned(),
             ],
+            vec![
+                "--raw-log".to_owned(),
+                "frames.ndjson".to_owned(),
+                "--influx-url".to_owned(),
+                "http://127.0.0.1:8086".to_owned(),
+            ],
         ] {
             assert!(Config::from_args(args).is_err());
         }
@@ -657,6 +674,32 @@ mod tests {
             })
         );
         assert_eq!(config.tank_id.as_deref(), Some("tank-1"));
+    }
+
+    #[test]
+    fn parses_complete_influx_stdin_configuration() {
+        let config = Config::from_args(
+            [
+                "--raw-log",
+                "frames.ndjson",
+                "--tank-id",
+                "tank-sim",
+                "--influx-url",
+                "http://127.0.0.1:8086",
+                "--influx-organization",
+                "aquarium",
+                "--influx-bucket",
+                "telemetry",
+                "--influx-token-file",
+                "/run/keys/influx-token",
+            ]
+            .map(str::to_owned),
+        )
+        .expect("valid stdin configuration");
+
+        assert!(config.device.is_none());
+        assert_eq!(config.tank_id.as_deref(), Some("tank-sim"));
+        assert!(config.influx.is_some());
     }
 
     #[test]
