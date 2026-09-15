@@ -193,8 +193,9 @@ The NixOS module accepts secret file paths so host configurations can use the
 existing `sops-nix` workflow. The module does not contain credentials, loads
 the collector token through a systemd credential, and passes the Grafana token
 through `INFLUXDB_TOKEN` in its runtime EnvironmentFile. The generated Grafana
-provisioning files are mounted read-only and contain no token value. Alarm
-NDJSON is not visualized by the dashboard yet.
+provisioning files are mounted read-only and contain no token value. The
+dashboard includes an alarm-events table when events are persisted to InfluxDB;
+local alarm NDJSON remains available for journald and file-based debugging.
 
 ## Rules configuration
 
@@ -221,9 +222,16 @@ least one rule option is configured, and configured rules require an alarm
 destination. Each normalized sample is evaluated with an explicit current time
 and the previous valid sample for the same tank.
 
+Telemetry can be batched with `--influx-batch-size N`; writes retry transport
+errors and HTTP 5xx responses with bounded backoff. `--influx-alarm-output`
+additionally stores alarm events as the `aquarium_alarm` measurement in the same
+InfluxDB bucket. Stdin simulator mode accepts `--sim-temperature-c VALUE` for a
+synthetic temperature and supports the same InfluxDB options as hardware mode.
+
 ## Next recommended milestone
 
-Exercise the serial path and OCI services on the target host, then validate the
-provisioned Grafana datasource, dashboard queries, and InfluxDB retention
-settings. Alarm NDJSON visualization and Grafana alert integration remain
-future work.
+Run the simulator-to-Influx workflow and validate the provisioned Grafana
+datasource, dashboard queries, alarm persistence, and InfluxDB retention settings.
+Then exercise the serial path and OCI services on the target host. Grafana alert
+notification routing remains future work because it requires an operator-owned
+notification policy.

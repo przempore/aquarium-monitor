@@ -96,6 +96,36 @@ let
           "fieldConfig": {"defaults": {"unit": "celsius", "decimals": 1}, "overrides": []},
           "targets": [{"refId": "A", "queryType": "0", "datasource": {"type": "influxdb", "uid": "aquarium-influxdb"}, "query": "from(bucket: v.defaultBucket)\n  |> range(start: -30d)\n  |> filter(fn: (r) => r._measurement == \"aquarium_telemetry\")\n  |> filter(fn: (r) => r._field == \"temp_c\")\n  |> filter(fn: (r) => r.tank_id =~ /^''${tank_id:regex}$/)\n  |> last()"}],
           "options": {"reduceOptions": {"values": false, "calcs": ["lastNotNull"], "fields": ""}, "orientation": "auto", "textMode": "auto", "colorMode": "value", "graphMode": "area", "justifyMode": "auto"}
+        },
+        {
+          "id": 5,
+          "type": "table",
+          "title": "Telemetry freshness",
+          "description": "Latest telemetry sample for the selected tank, including age in seconds.",
+          "gridPos": {"h": 7, "w": 12, "x": 12, "y": 8},
+          "fieldConfig": {"defaults": {}, "overrides": []},
+          "targets": [{"refId": "A", "queryType": "0", "datasource": {"type": "influxdb", "uid": "aquarium-influxdb"}, "query": "from(bucket: v.defaultBucket)\n  |> range(start: -30d)\n  |> filter(fn: (r) => r._measurement == \"aquarium_telemetry\")\n  |> filter(fn: (r) => r.tank_id =~ /^''${tank_id:regex}$/)\n  |> group(columns: [\"tank_id\", \"_field\"])\n  |> last()\n  |> keep(columns: [\"_time\", \"_value\", \"_field\", \"tank_id\"])\n  |> map(fn: (r) => ({r with age_seconds: float(v: uint(v: now()) - uint(v: r._time)) / 1000000000.0}))"}],
+          "options": {"showHeader": true, "sort": [{"desc": true, "displayName": "_time"}]}
+        },
+        {
+          "id": 6,
+          "type": "table",
+          "title": "Telemetry source and quality",
+          "description": "Sample counts grouped by the source and quality tags for the selected tank.",
+          "gridPos": {"h": 7, "w": 12, "x": 0, "y": 13},
+          "fieldConfig": {"defaults": {}, "overrides": []},
+          "targets": [{"refId": "A", "queryType": "0", "datasource": {"type": "influxdb", "uid": "aquarium-influxdb"}, "query": "from(bucket: v.defaultBucket)\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"aquarium_telemetry\")\n  |> filter(fn: (r) => r.tank_id =~ /^''${tank_id:regex}$/)\n  |> group(columns: [\"tank_id\", \"source\", \"quality\"])\n  |> count(column: \"_value\")\n  |> rename(columns: {_value: \"sample_count\"})"}],
+          "options": {"showHeader": true}
+        },
+        {
+          "id": 7,
+          "type": "table",
+          "title": "Alarm events",
+          "description": "Alarm data is available only when the collector is started with --influx-alarm-output.",
+          "gridPos": {"h": 8, "w": 24, "x": 0, "y": 20},
+          "fieldConfig": {"defaults": {}, "overrides": []},
+          "targets": [{"refId": "A", "queryType": "0", "datasource": {"type": "influxdb", "uid": "aquarium-influxdb"}, "query": "from(bucket: v.defaultBucket)\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"aquarium_alarm\")\n  |> filter(fn: (r) => r.tank_id =~ /^''${tank_id:regex}$/)\n  |> pivot(rowKey: [\"_time\", \"tank_id\", \"rule_id\", \"severity\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> keep(columns: [\"_time\", \"tank_id\", \"rule_id\", \"severity\", \"reason\", \"observed_value\"])\n  |> sort(columns: [\"_time\"], desc: true)\n  |> limit(n: 100)"}],
+          "options": {"showHeader": true, "sort": [{"desc": true, "displayName": "_time"}]}
         }
       ]
     }

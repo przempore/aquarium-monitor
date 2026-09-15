@@ -116,7 +116,7 @@ fn main() -> io::Result<()> {
             }
             std::thread::sleep(config.interval);
         }
-    } else if config.influx.is_some() || rules.is_some() {
+    } else if config.influx.is_some() || rules.is_some() || config.sim_temperature_c.is_some() {
         let sink = match config.influx.as_ref() {
             Some(influx) => {
                 let token = read_token_file(&influx.token_file)?;
@@ -143,6 +143,7 @@ fn main() -> io::Result<()> {
             raw_file,
             sink,
             config.tank_id.as_deref().unwrap_or("stdin-demo"),
+            config.sim_temperature_c,
             RuleRuntime::new(
                 rules,
                 alarm_output,
@@ -165,6 +166,7 @@ fn collect_stdin_with_rules<R: BufRead, W: Write>(
     raw_file: std::fs::File,
     mut sink: TelemetrySink<W>,
     tank_id: &str,
+    sim_temperature_c: Option<f32>,
     mut runtime: RuleRuntime,
 ) -> io::Result<usize> {
     let mut source = StdinSource::new(reader);
@@ -173,7 +175,10 @@ fn collect_stdin_with_rules<R: BufRead, W: Write>(
     while let Some(frame) = source.read_frame_or_eof()? {
         raw_logger.write_frame(&frame)?;
         match parse_ec_frame_for_tank(tank_id, &frame) {
-            Ok(sample) => {
+            Ok(mut sample) => {
+                if let Some(temperature_c) = sim_temperature_c {
+                    sample.temp_c = Some(temperature_c);
+                }
                 runtime.process(sample, &mut sink)?;
                 successful_samples += 1;
             }
@@ -299,6 +304,7 @@ struct Config {
     tank_id: Option<String>,
     device: Option<PathBuf>,
     temperature_path: Option<PathBuf>,
+    sim_temperature_c: Option<f32>,
     interval: std::time::Duration,
     influx: Option<InfluxConfig>,
     alarm_output: Option<String>,
@@ -333,6 +339,7 @@ impl Config {
         let mut device = None;
         let mut interval = None;
         let mut temperature_path = None;
+        let mut sim_temperature_c = None;
         let mut influx_url = None;
         let mut influx_organization = None;
         let mut influx_bucket = None;
@@ -369,6 +376,9 @@ impl Config {
                 "--tank-id" => tank_id = Some(value),
                 "--device" => device = Some(PathBuf::from(value)),
                 "--temperature-path" => temperature_path = Some(PathBuf::from(value)),
+                "--sim-temperature-c" => {
+                    sim_temperature_c = Some(parse_float(&value, "--sim-temperature-c")?)
+                }
                 "--influx-url" => influx_url = Some(value),
                 "--influx-organization" => influx_organization = Some(value),
                 "--influx-bucket" => influx_bucket = Some(value),
@@ -429,6 +439,11 @@ impl Config {
                 "--device and --temperature-path must be provided together",
             ));
         }
+        if device.is_some() && sim_temperature_c.is_some() {
+            return Err(invalid_arguments(
+                "--sim-temperature-c is only valid in stdin mode",
+            ));
+        }
         let influx_values = [
             influx_url.is_some(),
             influx_organization.is_some(),
@@ -452,6 +467,7 @@ impl Config {
             tank_id,
             device,
             temperature_path,
+            sim_temperature_c,
             interval: std::time::Duration::from_secs(interval.unwrap_or(0)),
             influx: influx_url.map(|url| InfluxConfig {
                 url,
@@ -660,6 +676,7 @@ fn invalid_arguments(message: &str) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Cursor;
 
     #[test]
     fn accepts_raw_log_option() {
@@ -671,6 +688,7 @@ mod tests {
                 tank_id: None,
                 device: None,
                 temperature_path: None,
+                sim_temperature_c: None,
                 interval: std::time::Duration::ZERO,
                 influx: None,
                 alarm_output: None,
@@ -689,6 +707,82 @@ mod tests {
                 spike_severity: None,
             }
         );
+    }
+
+    #[test]
+    fn parses_simulator_temperature_for_stdin_mode() {
+        let config = Config::from_args(
+            ["--raw-log", "frames.ndjson", "--sim-temperature-c", "26.5"].map(str::to_owned),
+        )
+        .expect("valid simulator temperature");
+
+        assert_eq!(config.sim_temperature_c, Some(26.5));
+    }
+
+    #[test]
+    fn rejects_invalid_or_hardware_simulator_temperature() {
+        for value in ["-1", "NaN", "inf"] {
+            assert!(
+                Config::from_args(
+                    ["--raw-log", "frames.ndjson", "--sim-temperature-c", value].map(str::to_owned),
+                )
+                .is_err()
+            );
+        }
+
+        assert!(
+            Config::from_args(
+                [
+                    "--raw-log",
+                    "frames.ndjson",
+                    "--device",
+                    "/dev/ttyUSB0",
+                    "--temperature-path",
+                    "/sys/w1_slave",
+                    "--tank-id",
+                    "tank-1",
+                    "--interval-seconds",
+                    "1",
+                    "--sim-temperature-c",
+                    "26.5",
+                ]
+                .map(str::to_owned),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn stdin_simulator_temperature_is_written_with_ec_output() {
+        let raw_path = std::env::temp_dir().join(format!(
+            "aquarium-collector-sim-temperature-{}",
+            std::process::id()
+        ));
+        let raw_file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&raw_path)
+            .expect("open raw log");
+        let mut output = Vec::new();
+        let mut simulator = simulator_ezo_ec::EzoEcCore::new();
+        let frame = simulator.handle_command("R");
+        let count = collect_stdin_with_rules(
+            Cursor::new(frame.into_bytes()),
+            raw_file,
+            TelemetrySink::Ndjson(NdjsonSink::new(&mut output)),
+            "tank-sim",
+            Some(26.5),
+            RuleRuntime::new(None, None, None),
+        )
+        .expect("collect simulator frame");
+
+        let sample: TelemetrySample = serde_json::from_slice(&output).expect("NDJSON sample");
+        assert_eq!(count, 1);
+        assert_eq!(sample.ec_us_cm, Some(450.0));
+        assert_eq!(sample.temp_c, Some(26.5));
+        assert_eq!(sample.source, common::SourceId::EzoEc);
+        fs::remove_file(raw_path).expect("remove raw log");
     }
 
     #[test]

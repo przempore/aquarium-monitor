@@ -114,7 +114,8 @@ collector. It emits one EZO-EC frame immediately and then once per second:
 ```sh
 nix develop --impure --command sh -c \
   'cargo run --quiet -p simulator-ezo-ec -- --continuous | \
-   cargo run --quiet -p collector -- --raw-log raw-frames.ndjson'
+   cargo run --quiet -p collector -- --raw-log raw-frames.ndjson \
+     --tank-id tank-sim --sim-temperature-c 26.5'
 ```
 
 To write that simulator stream to a local InfluxDB instance, create a token
@@ -124,9 +125,28 @@ file first, then run:
 nix develop --impure --command sh -c \
   'cargo run --quiet -p simulator-ezo-ec -- --continuous | \
    cargo run --quiet -p collector -- --raw-log raw-frames.ndjson \
-     --tank-id tank-sim --influx-url http://127.0.0.1:8086 \
-     --influx-organization aquarium --influx-bucket telemetry \
-     --influx-token-file /run/keys/influx-token'
+      --tank-id tank-sim --sim-temperature-c 26.5 \
+      --influx-url http://127.0.0.1:8086 \
+      --influx-organization aquarium --influx-bucket telemetry \
+      --influx-token-file /run/keys/influx-token'
+```
+
+`--sim-temperature-c VALUE` is stdin-mode-only synthetic temperature attached to
+each simulator EC sample with the same timestamp. `VALUE` must be finite and
+non-negative; it is not a hardware temperature reading. Stop the simulator with
+`Ctrl-C` to close the pipe, then remove local simulator output with:
+
+```sh
+rm -f raw-frames.ndjson
+```
+
+To reset simulator telemetry in local InfluxDB, run this local delete command:
+
+```sh
+influx delete --host http://127.0.0.1:8086 --org aquarium --bucket telemetry \
+  --token "$(tr -d '\r\n' < /run/keys/influx-token)" \
+  --start 1970-01-01T00:00:00Z --stop 2100-01-01T00:00:00Z \
+  --predicate 'tank_id="tank-sim"'
 ```
 
 The token file is required and should contain only the InfluxDB token. Stop the
@@ -350,10 +370,12 @@ generated with `pkgs.writeText` and mounted read-only. Grafana reaches InfluxDB
 through Podman's local host gateway at `host.containers.internal`.
 
 The dashboard shows generic EC and temperature time series, current-value stat
-panels, and a `tank_id` selector populated from InfluxDB. It uses the stable
-datasource UID `aquarium-influxdb`, the `aquarium_telemetry` measurement, and
-the `ec_us_cm` and `temp_c` fields; it does not contain tank IDs or alarm
-thresholds. Alarm NDJSON is not visualized by this dashboard yet.
+panels, telemetry freshness, source/quality counts, and an alarm-events table,
+with a `tank_id` selector populated from InfluxDB. It uses the stable datasource
+UID `aquarium-influxdb`, the `aquarium_telemetry` and `aquarium_alarm`
+measurements, and the `ec_us_cm` and `temp_c` fields; it does not contain tank
+IDs or alarm thresholds. The alarm-events panel has data only when the
+collector is started with `--influx-alarm-output`.
 
 The repository module remains secret-provider agnostic; `sops-nix` supplies the
 runtime paths. The collector receives its token through a systemd credential,

@@ -65,10 +65,15 @@ assert builtins.match ".*INFLUXDB_TOKEN.*" (builtins.readFile (builtins.head (pk
 assert builtins.match ".*test-token.*" (builtins.readFile (builtins.head (pkgs.lib.splitString ":" datasourceVolume))) == null;
 assert builtins.match ".*uid: aquarium-influxdb.*" (builtins.readFile (builtins.head (pkgs.lib.splitString ":" datasourceVolume))) != null;
 assert dashboard.uid == "aquarium-monitor";
-assert builtins.length dashboard.panels == 4;
+ assert builtins.length dashboard.panels == 7;
 assert builtins.match ".*tank_id.*" (builtins.readFile (builtins.head (pkgs.lib.splitString ":" dashboardVolume))) != null;
 assert builtins.match ".*ec_us_cm.*" (builtins.readFile (builtins.head (pkgs.lib.splitString ":" dashboardVolume))) != null;
-assert builtins.match ".*temp_c.*" (builtins.readFile (builtins.head (pkgs.lib.splitString ":" dashboardVolume))) != null;
+ assert builtins.match ".*temp_c.*" (builtins.readFile (builtins.head (pkgs.lib.splitString ":" dashboardVolume))) != null;
+ assert builtins.match ".*Telemetry freshness.*" (builtins.readFile (builtins.head (pkgs.lib.splitString ":" dashboardVolume))) != null;
+ assert builtins.match ".*source.*quality.*" (builtins.readFile (builtins.head (pkgs.lib.splitString ":" dashboardVolume))) != null;
+ assert builtins.match ".*aquarium_alarm.*rule_id.*observed_value.*" (builtins.readFile (builtins.head (pkgs.lib.splitString ":" dashboardVolume))) != null;
+ assert builtins.match ".*--influx-alarm-output.*" (builtins.readFile (builtins.head (pkgs.lib.splitString ":" dashboardVolume))) != null;
+ assert builtins.all (uid: uid == "aquarium-influxdb") (builtins.concatLists (map (panel: map (target: target.datasource.uid) panel.targets) dashboard.panels));
    assert evaluated.config.virtualisation.oci-containers.containers.influxdb.environmentFiles == [ "/run/keys/influxdb-environment" ];
    assert service.serviceConfig.DynamicUser;
    assert service.serviceConfig.StateDirectory == "aquarium-monitor";
