@@ -5,7 +5,7 @@ let
     inherit (pkgs) system;
     modules = [ module ];
   };
-  evaluated = nixpkgs.lib.nixosSystem {
+   evaluated = nixpkgs.lib.nixosSystem {
     inherit (pkgs) system;
     modules = [
       module
@@ -29,8 +29,31 @@ let
            services.aquarium-monitor.grafana.healthCheck.enable = true;
         }
        ];
+    };
+   evaluatedSimulator = nixpkgs.lib.nixosSystem {
+     inherit (pkgs) system;
+     modules = [
+       module
+       {
+         services.aquarium-monitor.simulator = {
+           enable = true;
+           tankId = "tank-sim";
+           temperatureC = 26.5;
+           intervalSeconds = 3;
+           rawLogPath = "/var/lib/aquarium-monitor/simulator.ndjson";
+         };
+         services.aquarium-monitor.influxdb = {
+           enable = true;
+           environmentFile = "/run/keys/influxdb-environment";
+           tokenFile = "/run/keys/influxdb-token";
+         };
+         services.aquarium-monitor.grafana.listenAddress = "100.64.0.10";
+         services.aquarium-monitor.grafana.enable = true;
+       }
+     ];
    };
-  service = evaluated.config.systemd.services.aquarium-monitor;
+   service = evaluated.config.systemd.services.aquarium-monitor;
+   simulatorService = evaluatedSimulator.config.systemd.services.aquarium-monitor-simulator;
   grafanaVolumes = evaluated.config.virtualisation.oci-containers.containers.grafana.volumes;
   datasourceVolume = builtins.head (builtins.filter (volume: builtins.match ".*aquarium-monitor-grafana-datasource.yml.*" volume != null) grafanaVolumes);
   dashboardProviderVolume = builtins.head (builtins.filter (volume: builtins.match ".*dashboard-provider.yml.*" volume != null) grafanaVolumes);
@@ -55,7 +78,8 @@ assert service.serviceConfig.Restart == "on-failure";
    assert builtins.elem "--health-cmd=wget --spider --quiet http://127.0.0.1:3000/api/health" evaluated.config.virtualisation.oci-containers.containers.grafana.extraOptions;
    assert builtins.elem "d '/var/lib/aquarium-monitor/influxdb' 0750 1000 1000 -" evaluated.config.systemd.tmpfiles.rules;
    assert builtins.elem "d '/var/lib/aquarium-monitor/grafana' 0750 472 472 -" evaluated.config.systemd.tmpfiles.rules;
-assert evaluated.config.virtualisation.oci-containers.containers.grafana.ports == [ "127.0.0.1:3000:3000" ];
+ assert evaluated.config.virtualisation.oci-containers.containers.grafana.ports == [ "127.0.0.1:3000:3000" ];
+ assert evaluatedSimulator.config.virtualisation.oci-containers.containers.grafana.ports == [ "100.64.0.10:3000:3000" ];
 assert builtins.match ".*:/etc/grafana/provisioning/datasources/aquarium-monitor.yml:ro" datasourceVolume != null;
 assert builtins.match ".*:/etc/grafana/provisioning/dashboards/aquarium-monitor.yml:ro" dashboardProviderVolume != null;
 assert builtins.match ".*:/etc/grafana/provisioning/dashboards/aquarium-monitor.json:ro" dashboardVolume != null;
@@ -77,5 +101,14 @@ assert builtins.match ".*ec_us_cm.*" (builtins.readFile (builtins.head (pkgs.lib
    assert evaluated.config.virtualisation.oci-containers.containers.influxdb.environmentFiles == [ "/run/keys/influxdb-environment" ];
    assert service.serviceConfig.DynamicUser;
    assert service.serviceConfig.StateDirectory == "aquarium-monitor";
-   assert service.serviceConfig.StateDirectoryMode == "0750";
-pkgs.runCommand "aquarium-monitor-module-evaluation" { } "touch $out"
+ assert service.serviceConfig.StateDirectoryMode == "0750";
+ assert builtins.match ".*simulator-ezo-ec.*--continuous.*--interval-seconds 3.*" (builtins.readFile simulatorService.serviceConfig.ExecStart) != null;
+ assert builtins.match ".*collector.*--raw-log /var/lib/aquarium-monitor/simulator.ndjson.*--tank-id tank-sim.*--sim-temperature-c 26.5.*" (builtins.readFile simulatorService.serviceConfig.ExecStart) != null;
+ assert builtins.match ".*--influx-url http://127.0.0.1:8086.*" (builtins.readFile simulatorService.serviceConfig.ExecStart) != null;
+ assert builtins.match ".*--influx-batch-size 1.*" (builtins.readFile simulatorService.serviceConfig.ExecStart) != null;
+ assert simulatorService.serviceConfig.LoadCredential == [ "influxdb-token:/run/keys/influxdb-token" ];
+ assert builtins.elem "podman-influxdb.service" simulatorService.requires;
+ assert builtins.elem "podman-influxdb.service" simulatorService.after;
+ assert evaluatedSimulator.config.virtualisation.oci-containers.containers.influxdb.ports == [ "127.0.0.1:8086:8086" ];
+ assert builtins.any (assertion: assertion.message == "services.aquarium-monitor.enable and services.aquarium-monitor.simulator.enable cannot both be enabled") evaluated.config.assertions;
+ pkgs.runCommand "aquarium-monitor-module-evaluation" { } "touch $out"

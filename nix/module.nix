@@ -1,4 +1,4 @@
-{ defaultPackage ? (_: null), lib, pkgs, config, ... }:
+{ defaultPackage ? (_: null), simulatorPackage ? (_: null), lib, pkgs, config, ... }:
 
 let
   cfg = config.services.aquarium-monitor;
@@ -138,10 +138,67 @@ let
       "--health-retries=${toString retries}"
       "--health-start-period=${startPeriod}"
     ];
+  simulatorCollectorArgs =
+    [ "--raw-log" cfg.simulator.rawLogPath
+      "--tank-id" cfg.simulator.tankId
+      "--sim-temperature-c" (toString cfg.simulator.temperatureC)
+      "--influx-batch-size" (toString cfg.influxBatchSize)
+    ]
+    ++ lib.optional cfg.influxAlarmOutput "--influx-alarm-output"
+    ++ lib.optionals (cfg.alarmOutput != null) [ "--alarm-output" cfg.alarmOutput ]
+    ++ lib.optionals (cfg.ecMinimum != null) [ "--ec-min" (toString cfg.ecMinimum) ]
+    ++ lib.optionals (cfg.ecMaximum != null) [ "--ec-max" (toString cfg.ecMaximum) ]
+    ++ lib.optionals (cfg.ecSeverity != null) [ "--ec-severity" cfg.ecSeverity ]
+    ++ lib.optionals (cfg.temperatureMinimum != null) [ "--temperature-min" (toString cfg.temperatureMinimum) ]
+    ++ lib.optionals (cfg.temperatureMaximum != null) [ "--temperature-max" (toString cfg.temperatureMaximum) ]
+    ++ lib.optionals (cfg.temperatureSeverity != null) [ "--temperature-severity" cfg.temperatureSeverity ]
+    ++ lib.optionals (cfg.maxAgeSeconds != null) [ "--max-age-seconds" (toString cfg.maxAgeSeconds) ]
+    ++ lib.optionals (cfg.staleSeverity != null) [ "--stale-severity" cfg.staleSeverity ]
+    ++ lib.optionals (cfg.spikeAbsolute != null) [ "--spike-absolute" (toString cfg.spikeAbsolute) ]
+    ++ lib.optionals (cfg.spikeRelative != null) [ "--spike-relative" (toString cfg.spikeRelative) ]
+    ++ lib.optionals (cfg.spikeSeverity != null) [ "--spike-severity" cfg.spikeSeverity ]
+    ++ [ "--influx-url" "http://127.0.0.1:${toString cfg.influxdb.port}"
+         "--influx-organization" cfg.influxdb.organization
+         "--influx-bucket" cfg.influxdb.bucket
+         "--influx-token-file" "/run/credentials/aquarium-monitor-simulator.service/influxdb-token"
+       ];
 in
 {
   options.services.aquarium-monitor = {
     enable = lib.mkEnableOption "the Aquarium Monitor collector";
+
+    simulator = {
+      enable = lib.mkEnableOption "the continuous Aquarium Monitor simulator";
+      package = lib.mkOption {
+        type = lib.types.package;
+        default =
+          let package = simulatorPackage pkgs.system;
+          in if package == null then
+            throw "services.aquarium-monitor.simulator.package must be set when importing the module directly"
+          else package;
+        description = "Simulator package to run.";
+      };
+      tankId = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        description = "Required stable tank identity for simulator telemetry.";
+      };
+      temperatureC = lib.mkOption {
+        type = lib.types.nullOr lib.types.float;
+        default = null;
+        description = "Required finite, non-negative synthetic temperature in degrees Celsius.";
+      };
+      intervalSeconds = lib.mkOption {
+        type = lib.types.ints.positive;
+        default = 1;
+        description = "Seconds between simulator frames.";
+      };
+      rawLogPath = lib.mkOption {
+        type = lib.types.path;
+        default = "/var/lib/aquarium-monitor/simulator-raw-frames.ndjson";
+        description = "Path to the simulator's append-only raw frame NDJSON log.";
+      };
+    };
 
     package = lib.mkOption {
       type = lib.types.package;
@@ -286,7 +343,8 @@ in
           backup hook.
         '';
       };
-      port = lib.mkOption { type = lib.types.port; default = 3000; description = "Local Grafana host port."; };
+       port = lib.mkOption { type = lib.types.port; default = 3000; description = "Grafana host port."; };
+       listenAddress = lib.mkOption { type = lib.types.str; default = "127.0.0.1"; description = "Host address on which Grafana is published."; };
       healthCheck = {
         enable = lib.mkOption { type = lib.types.bool; default = true; description = "Enable a Grafana container health check."; };
         command = lib.mkOption { type = lib.types.str; default = "wget --spider --quiet http://127.0.0.1:3000/api/health"; description = "Command run inside the Grafana container."; };
@@ -314,6 +372,18 @@ in
   };
 
   config = lib.mkMerge [
+    {
+      assertions = [
+        {
+          assertion = !(cfg.enable && cfg.simulator.enable);
+          message = "services.aquarium-monitor.enable and services.aquarium-monitor.simulator.enable cannot both be enabled";
+        }
+        {
+          assertion = cfg.grafana.listenAddress != "";
+          message = "services.aquarium-monitor.grafana.listenAddress must not be empty";
+        }
+      ];
+    }
     (lib.mkIf (cfg.influxdb.enable || cfg.grafana.enable) {
       virtualisation.oci-containers.backend = "podman";
     })
@@ -367,7 +437,7 @@ in
       ];
       virtualisation.oci-containers.containers.grafana = {
         image = cfg.grafana.image;
-        ports = [ "127.0.0.1:${toString cfg.grafana.port}:3000" ];
+         ports = [ "${cfg.grafana.listenAddress}:${toString cfg.grafana.port}:3000" ];
         volumes = [ "${cfg.grafana.dataDir}:/var/lib/grafana" ]
           ++ lib.optional cfg.grafana.provisioning.enable
             "${grafanaDatasourceProvisioning}:/etc/grafana/provisioning/datasources/aquarium-monitor.yml:ro"
@@ -437,6 +507,46 @@ in
           ];
           LoadCredential = lib.optional cfg.influxdb.enable "influxdb-token:${cfg.influxdb.tokenFile}";
           StandardInput = "null";
+          Restart = "on-failure";
+          RestartSec = 5;
+          StateDirectory = "aquarium-monitor";
+          StateDirectoryMode = "0750";
+          DynamicUser = true;
+          NoNewPrivileges = true;
+          PrivateTmp = true;
+          ProtectHome = true;
+          ProtectSystem = "strict";
+        };
+      };
+    })
+    (lib.mkIf cfg.simulator.enable {
+      assertions = [
+        { assertion = cfg.simulator.tankId != null && cfg.simulator.tankId != ""; message = "services.aquarium-monitor.simulator.tankId must be set"; }
+        { assertion = cfg.simulator.temperatureC != null && cfg.simulator.temperatureC >= 0.0 && lib.isFinite cfg.simulator.temperatureC; message = "services.aquarium-monitor.simulator.temperatureC must be finite and non-negative"; }
+        { assertion = cfg.influxdb.enable; message = "services.aquarium-monitor.simulator.enable requires InfluxDB to be enabled"; }
+        { assertion = cfg.influxdb.environmentFile != null; message = "services.aquarium-monitor.influxdb.environmentFile must be set for the simulator"; }
+        { assertion = cfg.influxdb.tokenFile != null; message = "services.aquarium-monitor.influxdb.tokenFile must be set for the simulator"; }
+      ];
+      systemd.services.aquarium-monitor-simulator = let
+        simulatorCommand = lib.escapeShellArgs [
+          "${cfg.simulator.package}/bin/simulator-ezo-ec"
+          "--continuous"
+          "--interval-seconds" (toString cfg.simulator.intervalSeconds)
+        ];
+        collectorCommand = lib.escapeShellArgs ([ "${cfg.package}/bin/collector" ] ++ simulatorCollectorArgs);
+        pipeline = pkgs.writeShellScript "aquarium-monitor-simulator" ''
+          set -o pipefail
+          ${simulatorCommand} | ${collectorCommand}
+        '';
+      in {
+        description = "Aquarium Monitor continuous simulator";
+        wantedBy = [ "multi-user.target" ];
+        wants = [ "podman-influxdb.service" ];
+        requires = [ "podman-influxdb.service" ];
+        after = [ "local-fs.target" "podman-influxdb.service" ];
+        serviceConfig = {
+          ExecStart = pipeline;
+          LoadCredential = [ "influxdb-token:${cfg.influxdb.tokenFile}" ];
           Restart = "on-failure";
           RestartSec = 5;
           StateDirectory = "aquarium-monitor";

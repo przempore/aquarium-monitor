@@ -381,6 +381,48 @@ The repository module remains secret-provider agnostic; `sops-nix` supplies the
 runtime paths. The collector receives its token through a systemd credential,
 while Grafana receives its token through its secret EnvironmentFile.
 
+### Continuous simulator profile
+
+For a deployable software-only profile, enable the simulator instead of the
+hardware collector. It requires InfluxDB and both secret paths:
+
+```nix
+services.aquarium-monitor.simulator = {
+  enable = true;
+  tankId = "tank-sim";
+  temperatureC = 26.5;
+  intervalSeconds = 1;
+  rawLogPath = "/var/lib/aquarium-monitor/simulator-raw-frames.ndjson";
+};
+services.aquarium-monitor.influxdb = {
+  enable = true;
+  environmentFile = config.sops.secrets."aquarium-monitor/influxdb-init".path;
+  tokenFile = config.sops.secrets."aquarium-monitor/influxdb-token".path;
+};
+```
+
+The simulator service continuously pipes the simulator package into the
+collector package, writes normalized telemetry to the local InfluxDB, and uses
+the same rule, alarm-output, batch-size, and Influx options as hardware mode.
+The simulator raw log defaults below the service `StateDirectory`, so the
+`DynamicUser` can write it. Custom raw or alarm paths must be writable by that
+transient user, or be placed below `/var/lib/aquarium-monitor`.
+
+Grafana remains localhost-only by default. To access it from another device,
+bind it to a host's Tailscale address and browse to `http://TAILSCALE-IP:3000`:
+
+```nix
+services.aquarium-monitor.grafana = {
+  enable = true;
+  listenAddress = "100.64.0.10";
+};
+```
+
+Alternatively use SSH local forwarding, for example
+`ssh -L 3000:127.0.0.1:3000 host`, then open `http://127.0.0.1:3000` in the
+browser. InfluxDB remains bound to `127.0.0.1:8086` and is not published on
+the Tailscale address.
+
 The module persists raw frames at
 `/var/lib/aquarium-monitor/raw-frames.ndjson` by default, starts the collector
 at boot, and restarts it on failure. `services.aquarium-monitor.package` can

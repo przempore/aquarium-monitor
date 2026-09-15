@@ -79,6 +79,7 @@
     (flake-utils.lib.eachDefaultSystem perSystem) // {
       nixosModules.default = {
         _module.args.defaultPackage = system: self.packages.${system}.collector;
+        _module.args.simulatorPackage = system: self.packages.${system}.simulator;
         imports = [ ./nix/module.nix ];
       };
     };
