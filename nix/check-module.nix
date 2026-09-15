@@ -17,13 +17,16 @@ let
          services.aquarium-monitor.intervalSeconds = 2;
          services.aquarium-monitor.influxdb.enable = true;
          services.aquarium-monitor.influxdb.environmentFile = "/run/keys/influxdb-environment";
-          services.aquarium-monitor.influxdb.tokenFile = "/run/keys/influxdb-token";
+         services.aquarium-monitor.influxdb.tokenFile = "/run/keys/influxdb-token";
+         services.aquarium-monitor.influxdb.retention = "30d";
+         services.aquarium-monitor.influxdb.healthCheck.enable = true;
           services.aquarium-monitor.grafana.enable = true;
          services.aquarium-monitor.grafana.provisioning = {
             enable = true;
             tokenEnvironmentFile = "/run/keys/grafana-influxdb-token-environment";
           };
-          services.aquarium-monitor.grafana.dashboard.enable = true;
+           services.aquarium-monitor.grafana.dashboard.enable = true;
+           services.aquarium-monitor.grafana.healthCheck.enable = true;
         }
        ];
    };
@@ -46,7 +49,12 @@ assert builtins.match ".*--influx-token-file /run/credentials/aquarium-monitor.s
 assert builtins.match ".*secret.*" service.serviceConfig.ExecStart == null;
 assert builtins.match ".*stty.*9600.*" service.serviceConfig.ExecStartPre != null;
 assert service.serviceConfig.Restart == "on-failure";
-assert evaluated.config.virtualisation.oci-containers.containers.influxdb.ports == [ "127.0.0.1:8086:8086" ];
+   assert evaluated.config.virtualisation.oci-containers.containers.influxdb.ports == [ "127.0.0.1:8086:8086" ];
+   assert evaluated.config.virtualisation.oci-containers.containers.influxdb.environment.DOCKER_INFLUXDB_INIT_RETENTION == "30d";
+   assert builtins.elem "--health-cmd=influx ping --host http://127.0.0.1:8086" evaluated.config.virtualisation.oci-containers.containers.influxdb.extraOptions;
+   assert builtins.elem "--health-cmd=wget --spider --quiet http://127.0.0.1:3000/api/health" evaluated.config.virtualisation.oci-containers.containers.grafana.extraOptions;
+   assert builtins.elem "d '/var/lib/aquarium-monitor/influxdb' 0750 1000 1000 -" evaluated.config.systemd.tmpfiles.rules;
+   assert builtins.elem "d '/var/lib/aquarium-monitor/grafana' 0750 472 472 -" evaluated.config.systemd.tmpfiles.rules;
 assert evaluated.config.virtualisation.oci-containers.containers.grafana.ports == [ "127.0.0.1:3000:3000" ];
 assert builtins.match ".*:/etc/grafana/provisioning/datasources/aquarium-monitor.yml:ro" datasourceVolume != null;
 assert builtins.match ".*:/etc/grafana/provisioning/dashboards/aquarium-monitor.yml:ro" dashboardProviderVolume != null;
@@ -61,5 +69,8 @@ assert builtins.length dashboard.panels == 4;
 assert builtins.match ".*tank_id.*" (builtins.readFile (builtins.head (pkgs.lib.splitString ":" dashboardVolume))) != null;
 assert builtins.match ".*ec_us_cm.*" (builtins.readFile (builtins.head (pkgs.lib.splitString ":" dashboardVolume))) != null;
 assert builtins.match ".*temp_c.*" (builtins.readFile (builtins.head (pkgs.lib.splitString ":" dashboardVolume))) != null;
-assert evaluated.config.virtualisation.oci-containers.containers.influxdb.environmentFiles == [ "/run/keys/influxdb-environment" ];
+   assert evaluated.config.virtualisation.oci-containers.containers.influxdb.environmentFiles == [ "/run/keys/influxdb-environment" ];
+   assert service.serviceConfig.DynamicUser;
+   assert service.serviceConfig.StateDirectory == "aquarium-monitor";
+   assert service.serviceConfig.StateDirectoryMode == "0750";
 pkgs.runCommand "aquarium-monitor-module-evaluation" { } "touch $out"

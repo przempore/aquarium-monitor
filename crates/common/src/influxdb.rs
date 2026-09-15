@@ -3,6 +3,7 @@ use std::error::Error;
 use std::fmt;
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
+use std::time::Duration;
 
 pub const MEASUREMENT: &str = "aquarium_telemetry";
 pub const PRECISION: &str = "ns";
@@ -45,6 +46,23 @@ impl fmt::Debug for InfluxDbConfig {
 pub struct HttpResponse {
     pub status: u16,
     pub body: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct RetryConfig {
+    pub max_attempts: usize,
+    pub initial_backoff: Duration,
+    pub max_backoff: Duration,
+}
+
+impl Default for RetryConfig {
+    fn default() -> Self {
+        Self {
+            max_attempts: 3,
+            initial_backoff: Duration::from_millis(100),
+            max_backoff: Duration::from_secs(2),
+        }
+    }
 }
 
 /// Minimal synchronous HTTP boundary, deliberately easy to replace in tests.
@@ -109,6 +127,9 @@ impl<E: Error + 'static> Error for InfluxDbError<E> {
 pub struct InfluxDbSink<T> {
     config: InfluxDbConfig,
     transport: T,
+    pending: Vec<String>,
+    batch_size: usize,
+    retry: RetryConfig,
 }
 
 impl<T> InfluxDbSink<T> {
@@ -122,7 +143,62 @@ impl<T> InfluxDbSink<T> {
                 "organization, bucket, and token are required",
             ));
         }
-        Ok(Self { config, transport })
+        Ok(Self {
+            config,
+            transport,
+            pending: Vec::new(),
+            batch_size: 1,
+            retry: RetryConfig::default(),
+        })
+    }
+
+    pub fn with_batch_size(mut self, batch_size: usize) -> Result<Self, InfluxDbError<T::Error>>
+    where
+        T: HttpTransport,
+    {
+        self.set_batch_size(batch_size)?;
+        Ok(self)
+    }
+
+    pub fn set_batch_size(&mut self, batch_size: usize) -> Result<(), InfluxDbError<T::Error>>
+    where
+        T: HttpTransport,
+    {
+        if batch_size == 0 {
+            return Err(InfluxDbError::InvalidConfiguration(
+                "batch size must be greater than zero",
+            ));
+        }
+        self.batch_size = batch_size;
+        Ok(())
+    }
+
+    pub fn with_retry_config(mut self, retry: RetryConfig) -> Result<Self, InfluxDbError<T::Error>>
+    where
+        T: HttpTransport,
+    {
+        self.set_retry_config(retry)?;
+        Ok(self)
+    }
+
+    pub fn set_retry_config(&mut self, retry: RetryConfig) -> Result<(), InfluxDbError<T::Error>>
+    where
+        T: HttpTransport,
+    {
+        if retry.max_attempts == 0 || retry.initial_backoff > retry.max_backoff {
+            return Err(InfluxDbError::InvalidConfiguration(
+                "retry attempts must be positive and initial backoff must not exceed maximum backoff",
+            ));
+        }
+        self.retry = retry;
+        Ok(())
+    }
+
+    pub fn flush(&mut self) -> Result<(), InfluxDbError<T::Error>>
+    where
+        T: HttpTransport,
+    {
+        self.send_pending()
     }
 
     pub fn into_inner(self) -> T {
@@ -134,28 +210,75 @@ impl<T: HttpTransport> Sink for InfluxDbSink<T> {
     type Error = InfluxDbError<T::Error>;
 
     fn write(&mut self, sample: TelemetrySample) -> Result<(), Self::Error> {
-        let body = encode_line_protocol(&sample).map_err(InfluxDbError::Encoding)?;
+        self.pending
+            .push(encode_line_protocol(&sample).map_err(InfluxDbError::Encoding)?);
+        if self.pending.len() < self.batch_size {
+            return Ok(());
+        }
+        self.send_pending()
+    }
+}
+
+impl<T: HttpTransport> InfluxDbSink<T> {
+    fn send_pending(&mut self) -> Result<(), InfluxDbError<T::Error>> {
+        if self.pending.is_empty() {
+            return Ok(());
+        }
+        let body = self.pending.join("\n");
         let url = write_url(&self.config);
         let auth = format!("Token {}", self.config.token);
-        let response = self
-            .transport
-            .post(
+        let mut attempt = 0;
+        let mut backoff = self.retry.initial_backoff;
+        loop {
+            attempt += 1;
+            let result = self.transport.post(
                 &url,
                 &[
                     ("Authorization", &auth),
                     ("Content-Type", "text/plain; charset=utf-8"),
                 ],
                 body.as_bytes(),
-            )
-            .map_err(InfluxDbError::Transport)?;
-        if (200..300).contains(&response.status) {
-            Ok(())
-        } else {
-            Err(InfluxDbError::HttpStatus {
-                status: response.status,
-            })
+            );
+            match result {
+                Ok(response) if (200..300).contains(&response.status) => {
+                    return self.clear_pending();
+                }
+                Ok(response) => {
+                    if (500..600).contains(&response.status) && attempt < self.retry.max_attempts {
+                        sleep_backoff(backoff);
+                        backoff = next_backoff(backoff, self.retry.max_backoff);
+                    } else {
+                        return Err(InfluxDbError::HttpStatus {
+                            status: response.status,
+                        });
+                    }
+                }
+                Err(error) => {
+                    if attempt < self.retry.max_attempts {
+                        sleep_backoff(backoff);
+                        backoff = next_backoff(backoff, self.retry.max_backoff);
+                    } else {
+                        return Err(InfluxDbError::Transport(error));
+                    }
+                }
+            }
         }
     }
+
+    fn clear_pending(&mut self) -> Result<(), InfluxDbError<T::Error>> {
+        self.pending.clear();
+        Ok(())
+    }
+}
+
+fn sleep_backoff(backoff: Duration) {
+    if !backoff.is_zero() {
+        std::thread::sleep(backoff);
+    }
+}
+
+fn next_backoff(backoff: Duration, maximum: Duration) -> Duration {
+    backoff.checked_mul(2).unwrap_or(maximum).min(maximum)
 }
 
 pub fn encode_line_protocol(sample: &TelemetrySample) -> Result<String, LineProtocolError> {
@@ -354,6 +477,40 @@ mod tests {
             })
         }
     }
+
+    struct Scripted {
+        results: Vec<Result<HttpResponse, MockError>>,
+        bodies: Vec<Vec<u8>>,
+    }
+
+    impl HttpTransport for Scripted {
+        type Error = MockError;
+
+        fn post(
+            &mut self,
+            _url: &str,
+            _headers: &[(&str, &str)],
+            body: &[u8],
+        ) -> Result<HttpResponse, MockError> {
+            self.bodies.push(body.to_vec());
+            self.results.remove(0)
+        }
+    }
+
+    fn response(status: u16) -> Result<HttpResponse, MockError> {
+        Ok(HttpResponse {
+            status,
+            body: Vec::new(),
+        })
+    }
+
+    fn no_delay_retry(max_attempts: usize) -> RetryConfig {
+        RetryConfig {
+            max_attempts,
+            initial_backoff: Duration::ZERO,
+            max_backoff: Duration::ZERO,
+        }
+    }
     fn sample(ec: Option<f32>, temp: Option<f32>) -> crate::TelemetrySample {
         crate::TelemetrySample {
             tank_id: "tank, west =\\zone".into(),
@@ -444,5 +601,103 @@ mod tests {
     #[test]
     fn tags_escape_protocol_delimiters() {
         assert_eq!(tag_value("a,b c=d\\e"), "a\\,b\\ c\\=d\\\\e");
+    }
+
+    #[test]
+    fn batches_lines_and_flushes_partial_batch() {
+        let transport = Scripted {
+            results: vec![response(204), response(204)],
+            bodies: Vec::new(),
+        };
+        let mut sink = InfluxDbSink::new(
+            InfluxDbConfig::new("http://localhost", "org", "bucket", "token"),
+            transport,
+        )
+        .unwrap()
+        .with_batch_size(2)
+        .unwrap();
+
+        sink.write(sample(Some(1.0), None)).unwrap();
+        assert!(sink.transport.bodies.is_empty());
+        sink.write(sample(Some(2.0), None)).unwrap();
+        assert_eq!(sink.transport.bodies.len(), 1);
+        assert_eq!(
+            sink.transport.bodies[0]
+                .iter()
+                .filter(|&&byte| byte == b'\n')
+                .count(),
+            1
+        );
+        sink.write(sample(Some(3.0), None)).unwrap();
+        sink.flush().unwrap();
+        assert_eq!(sink.transport.bodies.len(), 2);
+        assert!(!sink.transport.bodies[1].contains(&b'\n'));
+        sink.flush().unwrap();
+        assert_eq!(sink.transport.bodies.len(), 2);
+    }
+
+    #[test]
+    fn retries_transport_errors_and_server_errors() {
+        let transport = Scripted {
+            results: vec![Err(MockError), response(503), response(204)],
+            bodies: Vec::new(),
+        };
+        let mut sink = InfluxDbSink::new(
+            InfluxDbConfig::new("http://localhost", "org", "bucket", "token"),
+            transport,
+        )
+        .unwrap()
+        .with_retry_config(no_delay_retry(3))
+        .unwrap();
+
+        sink.write(sample(Some(1.0), None)).unwrap();
+        assert_eq!(sink.transport.bodies.len(), 3);
+    }
+
+    #[test]
+    fn does_not_retry_client_errors() {
+        let transport = Scripted {
+            results: vec![response(429), response(204)],
+            bodies: Vec::new(),
+        };
+        let mut sink = InfluxDbSink::new(
+            InfluxDbConfig::new("http://localhost", "org", "bucket", "token"),
+            transport,
+        )
+        .unwrap()
+        .with_retry_config(no_delay_retry(3))
+        .unwrap();
+
+        assert!(matches!(
+            sink.write(sample(Some(1.0), None)),
+            Err(InfluxDbError::HttpStatus { status: 429 })
+        ));
+        assert_eq!(sink.transport.bodies.len(), 1);
+    }
+
+    #[test]
+    fn failed_flush_keeps_batch_for_a_later_flush() {
+        let transport = Scripted {
+            results: vec![response(500), response(204)],
+            bodies: Vec::new(),
+        };
+        let mut sink = InfluxDbSink::new(
+            InfluxDbConfig::new("http://localhost", "org", "bucket", "token"),
+            transport,
+        )
+        .unwrap()
+        .with_batch_size(2)
+        .unwrap()
+        .with_retry_config(no_delay_retry(1))
+        .unwrap();
+
+        sink.write(sample(Some(1.0), None)).unwrap();
+        assert!(matches!(
+            sink.flush(),
+            Err(InfluxDbError::HttpStatus { status: 500 })
+        ));
+        sink.flush().unwrap();
+        assert_eq!(sink.transport.bodies.len(), 2);
+        assert_eq!(sink.transport.bodies[0], sink.transport.bodies[1]);
     }
 }

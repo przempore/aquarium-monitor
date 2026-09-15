@@ -100,6 +100,14 @@ let
       ]
     }
   '';
+  healthCheckOptions = { enable, command, interval, timeout, retries, startPeriod }:
+    lib.optionals enable [
+      "--health-cmd=${command}"
+      "--health-interval=${interval}"
+      "--health-timeout=${timeout}"
+      "--health-retries=${toString retries}"
+      "--health-start-period=${startPeriod}"
+    ];
 in
 {
   options.services.aquarium-monitor = {
@@ -148,7 +156,12 @@ in
     alarmOutput = lib.mkOption {
       type = lib.types.nullOr lib.types.str;
       default = null;
-      description = "Optional alarm NDJSON destination: a local append-only path or the literal stderr (journald).";
+      description = ''
+        Optional alarm NDJSON destination: a local append-only path or the
+        literal stderr (journald). Paths below /var/lib/aquarium-monitor are
+        writable with the service's DynamicUser; other paths must be prepared
+        with permissions for the transient service user.
+      '';
     };
 
     ecMinimum = lib.mkOption { type = lib.types.nullOr lib.types.float; default = null; description = "Optional EC lower limit."; };
@@ -172,10 +185,35 @@ in
     influxdb = {
       enable = lib.mkEnableOption "a local InfluxDB 2.x OCI container";
       image = lib.mkOption { type = lib.types.str; default = "influxdb:2.7"; description = "InfluxDB image and tag."; };
-      dataDir = lib.mkOption { type = lib.types.str; default = "/var/lib/aquarium-monitor/influxdb"; description = "Persistent InfluxDB data directory."; };
+      dataDir = lib.mkOption {
+        type = lib.types.str;
+        default = "/var/lib/aquarium-monitor/influxdb";
+        description = ''
+          Persistent InfluxDB data directory. Include this directory in local
+          filesystem snapshots or stop the container before copying it; the
+          OCI module has no application-consistent backup hook.
+        '';
+      };
       port = lib.mkOption { type = lib.types.port; default = 8086; description = "Local InfluxDB host port."; };
       organization = lib.mkOption { type = lib.types.str; default = "aquarium"; description = "InfluxDB organization."; };
       bucket = lib.mkOption { type = lib.types.str; default = "telemetry"; description = "InfluxDB bucket."; };
+      retention = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        description = ''
+          Optional bucket retention duration passed to InfluxDB during initial
+          setup (for example, "30d" or "0s" for infinite retention). This is
+          an initialization setting and does not change an already-created bucket.
+        '';
+      };
+      healthCheck = {
+        enable = lib.mkOption { type = lib.types.bool; default = true; description = "Enable an InfluxDB container health check."; };
+        command = lib.mkOption { type = lib.types.str; default = "influx ping --host http://127.0.0.1:8086"; description = "Command run inside the InfluxDB container."; };
+        interval = lib.mkOption { type = lib.types.str; default = "30s"; description = "Health-check interval."; };
+        timeout = lib.mkOption { type = lib.types.str; default = "5s"; description = "Health-check timeout."; };
+        retries = lib.mkOption { type = lib.types.ints.positive; default = 3; description = "Consecutive failures before the container is unhealthy."; };
+        startPeriod = lib.mkOption { type = lib.types.str; default = "30s"; description = "Startup grace period."; };
+      };
       environmentFile = lib.mkOption {
         type = lib.types.nullOr lib.types.path;
         default = null;
@@ -197,8 +235,24 @@ in
     grafana = {
       enable = lib.mkEnableOption "a local Grafana OCI container";
       image = lib.mkOption { type = lib.types.str; default = "grafana/grafana:11.5.2"; description = "Grafana image and tag."; };
-      dataDir = lib.mkOption { type = lib.types.str; default = "/var/lib/aquarium-monitor/grafana"; description = "Persistent Grafana data directory."; };
+      dataDir = lib.mkOption {
+        type = lib.types.str;
+        default = "/var/lib/aquarium-monitor/grafana";
+        description = ''
+          Persistent Grafana data directory. Include this directory in local
+          filesystem snapshots; the OCI module has no application-consistent
+          backup hook.
+        '';
+      };
       port = lib.mkOption { type = lib.types.port; default = 3000; description = "Local Grafana host port."; };
+      healthCheck = {
+        enable = lib.mkOption { type = lib.types.bool; default = true; description = "Enable a Grafana container health check."; };
+        command = lib.mkOption { type = lib.types.str; default = "wget --spider --quiet http://127.0.0.1:3000/api/health"; description = "Command run inside the Grafana container."; };
+        interval = lib.mkOption { type = lib.types.str; default = "30s"; description = "Health-check interval."; };
+        timeout = lib.mkOption { type = lib.types.str; default = "5s"; description = "Health-check timeout."; };
+        retries = lib.mkOption { type = lib.types.ints.positive; default = 3; description = "Consecutive failures before the container is unhealthy."; };
+        startPeriod = lib.mkOption { type = lib.types.str; default = "30s"; description = "Startup grace period."; };
+      };
       provisioning = {
         enable = lib.mkEnableOption "an InfluxDB datasource provisioned in Grafana";
         tokenEnvironmentFile = lib.mkOption {
@@ -229,16 +283,29 @@ in
         }
         {
           assertion = cfg.influxdb.organization != "" && cfg.influxdb.bucket != "";
-          message = "InfluxDB organization and bucket must not be empty";
-        }
+         message = "InfluxDB organization and bucket must not be empty";
+       }
+       {
+         assertion = cfg.influxdb.retention == null || cfg.influxdb.retention != "";
+         message = "InfluxDB retention must not be empty when configured";
+       }
+       {
+         assertion = !cfg.influxdb.healthCheck.enable || cfg.influxdb.healthCheck.command != "";
+         message = "InfluxDB health-check command must not be empty when health checks are enabled";
+       }
       ];
       virtualisation.oci-containers.containers.influxdb = {
         image = cfg.influxdb.image;
         ports = [ "127.0.0.1:${toString cfg.influxdb.port}:8086" ];
         volumes = [ "${cfg.influxdb.dataDir}:/var/lib/influxdb2" ];
+        environment = lib.optionalAttrs (cfg.influxdb.retention != null) {
+          DOCKER_INFLUXDB_INIT_RETENTION = cfg.influxdb.retention;
+        };
         environmentFiles = lib.optional (cfg.influxdb.environmentFile != null) cfg.influxdb.environmentFile;
-        extraOptions = [ "--pull=missing" "--restart=on-failure" ];
+        extraOptions = [ "--pull=missing" "--restart=on-failure" ]
+          ++ healthCheckOptions cfg.influxdb.healthCheck;
       };
+      systemd.tmpfiles.rules = [ "d '${cfg.influxdb.dataDir}' 0750 1000 1000 -" ];
     })
     (lib.mkIf cfg.grafana.enable {
       assertions = lib.optionals cfg.grafana.provisioning.enable [
@@ -249,6 +316,11 @@ in
         {
           assertion = cfg.grafana.provisioning.tokenEnvironmentFile != null;
           message = "services.aquarium-monitor.grafana.provisioning.tokenEnvironmentFile must be set when datasource provisioning is enabled";
+        }
+      ] ++ [
+        {
+          assertion = !cfg.grafana.healthCheck.enable || cfg.grafana.healthCheck.command != "";
+          message = "Grafana health-check command must not be empty when health checks are enabled";
         }
       ];
       virtualisation.oci-containers.containers.grafana = {
@@ -263,8 +335,10 @@ in
           ];
         environmentFiles = lib.optional cfg.grafana.provisioning.enable cfg.grafana.provisioning.tokenEnvironmentFile;
         dependsOn = lib.optional cfg.influxdb.enable "influxdb";
-        extraOptions = [ "--pull=missing" "--restart=on-failure" ];
+        extraOptions = [ "--pull=missing" "--restart=on-failure" ]
+          ++ healthCheckOptions cfg.grafana.healthCheck;
       };
+      systemd.tmpfiles.rules = [ "d '${cfg.grafana.dataDir}' 0750 472 472 -" ];
     })
     (lib.mkIf cfg.grafana.dashboard.enable {
       assertions = [
@@ -321,6 +395,7 @@ in
           Restart = "on-failure";
           RestartSec = 5;
           StateDirectory = "aquarium-monitor";
+          StateDirectoryMode = "0750";
           DynamicUser = true;
           NoNewPrivileges = true;
           PrivateTmp = true;
