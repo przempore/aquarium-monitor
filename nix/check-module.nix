@@ -1,6 +1,8 @@
 { nixpkgs, pkgs, module }:
 
 let
+  testCollector = pkgs.writeShellScriptBin "collector-test" "exit 0";
+  testSimulator = pkgs.writeShellScriptBin "simulator-ezo-ec-test" "exit 0";
   evaluatedDisabled = nixpkgs.lib.nixosSystem {
     inherit (pkgs) system;
     modules = [ module ];
@@ -8,8 +10,10 @@ let
    evaluated = nixpkgs.lib.nixosSystem {
     inherit (pkgs) system;
     modules = [
-      module
+        module
       {
+        services.aquarium-monitor.package = testCollector;
+        services.aquarium-monitor.simulator.package = testSimulator;
         services.aquarium-monitor.enable = true;
         services.aquarium-monitor.device = "/dev/ttyUSB0";
         services.aquarium-monitor.tankId = "tank-1";
@@ -33,9 +37,11 @@ let
    evaluatedSimulator = nixpkgs.lib.nixosSystem {
      inherit (pkgs) system;
      modules = [
-       module
-       {
-         services.aquarium-monitor.simulator = {
+        module
+        {
+          services.aquarium-monitor.package = testCollector;
+          services.aquarium-monitor.simulator.package = testSimulator;
+          services.aquarium-monitor.simulator = {
            enable = true;
            tankId = "tank-sim";
            temperatureC = 26.5;
