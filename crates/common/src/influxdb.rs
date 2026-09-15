@@ -1,3 +1,4 @@
+use crate::rules::AlarmEvent;
 use crate::{Sink, TelemetrySample};
 use std::error::Error;
 use std::fmt;
@@ -6,6 +7,7 @@ use std::net::TcpStream;
 use std::time::Duration;
 
 pub const MEASUREMENT: &str = "aquarium_telemetry";
+pub const ALARM_MEASUREMENT: &str = "aquarium_alarm";
 pub const PRECISION: &str = "ns";
 
 /// Explicit InfluxDB connection settings. The token has no implicit default.
@@ -271,6 +273,101 @@ impl<T: HttpTransport> InfluxDbSink<T> {
     }
 }
 
+/// Optional persistence destination for rule violations. It uses the same
+/// InfluxDB transport and configuration as telemetry, but a separate batch.
+pub struct AlarmSink<T> {
+    config: InfluxDbConfig,
+    transport: T,
+    pending: Vec<String>,
+    batch_size: usize,
+    retry: RetryConfig,
+}
+
+impl<T: HttpTransport> AlarmSink<T> {
+    pub fn new(config: InfluxDbConfig, transport: T) -> Result<Self, InfluxDbError<T::Error>> {
+        validate_url(&config.url)?;
+        if config.organization.is_empty() || config.bucket.is_empty() || config.token.is_empty() {
+            return Err(InfluxDbError::InvalidConfiguration(
+                "organization, bucket, and token are required",
+            ));
+        }
+        Ok(Self {
+            config,
+            transport,
+            pending: Vec::new(),
+            batch_size: 1,
+            retry: RetryConfig::default(),
+        })
+    }
+
+    pub fn with_batch_size(mut self, batch_size: usize) -> Result<Self, InfluxDbError<T::Error>> {
+        if batch_size == 0 {
+            return Err(InfluxDbError::InvalidConfiguration(
+                "batch size must be greater than zero",
+            ));
+        }
+        self.batch_size = batch_size;
+        Ok(self)
+    }
+
+    pub fn write(&mut self, alarm: AlarmEvent) -> Result<(), InfluxDbError<T::Error>> {
+        self.pending
+            .push(encode_alarm_line_protocol(&alarm).map_err(InfluxDbError::Encoding)?);
+        if self.pending.len() >= self.batch_size {
+            self.flush()?;
+        }
+        Ok(())
+    }
+
+    pub fn flush(&mut self) -> Result<(), InfluxDbError<T::Error>> {
+        if self.pending.is_empty() {
+            return Ok(());
+        }
+        let body = self.pending.join("\n");
+        let url = write_url(&self.config);
+        let auth = format!("Token {}", self.config.token);
+        let mut attempt = 0;
+        let mut backoff = self.retry.initial_backoff;
+        loop {
+            attempt += 1;
+            match self.transport.post(
+                &url,
+                &[
+                    ("Authorization", &auth),
+                    ("Content-Type", "text/plain; charset=utf-8"),
+                ],
+                body.as_bytes(),
+            ) {
+                Ok(response) if (200..300).contains(&response.status) => {
+                    self.pending.clear();
+                    return Ok(());
+                }
+                Ok(response)
+                    if (500..600).contains(&response.status)
+                        && attempt < self.retry.max_attempts =>
+                {
+                    sleep_backoff(backoff);
+                    backoff = next_backoff(backoff, self.retry.max_backoff);
+                }
+                Ok(response) => {
+                    return Err(InfluxDbError::HttpStatus {
+                        status: response.status,
+                    });
+                }
+                Err(_error) if attempt < self.retry.max_attempts => {
+                    sleep_backoff(backoff);
+                    backoff = next_backoff(backoff, self.retry.max_backoff);
+                }
+                Err(error) => return Err(InfluxDbError::Transport(error)),
+            }
+        }
+    }
+
+    pub fn into_inner(self) -> T {
+        self.transport
+    }
+}
+
 fn sleep_backoff(backoff: Duration) {
     if !backoff.is_zero() {
         std::thread::sleep(backoff);
@@ -312,12 +409,38 @@ pub fn encode_line_protocol(sample: &TelemetrySample) -> Result<String, LineProt
     Ok(line)
 }
 
+pub fn encode_alarm_line_protocol(alarm: &AlarmEvent) -> Result<String, LineProtocolError> {
+    if alarm.observed_value.is_some_and(|value| !value.is_finite()) {
+        return Err(LineProtocolError::InvalidFieldValue("observed_value"));
+    }
+    let mut fields = format!("reason=\"{}\"", string_field_value(&alarm.reason));
+    if let Some(value) = alarm.observed_value {
+        fields.push_str(&format!(",observed_value={value}"));
+    }
+    Ok(format!(
+        "{ALARM_MEASUREMENT},tank_id={},rule_id={},severity={} {} {}",
+        tag_value(&alarm.tank_id),
+        tag_value(&alarm.rule_id),
+        tag_value(&alarm.severity.to_string()),
+        fields,
+        alarm.timestamp.unix_timestamp_nanos()
+    ))
+}
+
 fn tag_value(value: &str) -> String {
     value
         .replace('\\', "\\\\")
         .replace(',', "\\,")
         .replace(' ', "\\ ")
         .replace('=', "\\=")
+}
+
+fn string_field_value(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
 }
 
 fn validate_url<E: Error + Send + Sync + 'static>(url: &str) -> Result<(), InfluxDbError<E>> {
@@ -432,6 +555,15 @@ impl fmt::Display for crate::Quality {
         f.write_str(match self {
             crate::Quality::Ok => "ok",
             crate::Quality::Invalid => "invalid",
+        })
+    }
+}
+
+impl fmt::Display for crate::rules::Severity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            crate::rules::Severity::Warning => "warning",
+            crate::rules::Severity::Critical => "critical",
         })
     }
 }

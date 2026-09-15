@@ -1,4 +1,8 @@
-use common::influxdb::{HttpResponse, HttpTransport, InfluxDbConfig, InfluxDbSink};
+use common::influxdb::{
+    AlarmSink, HttpResponse, HttpTransport, InfluxDbConfig, InfluxDbSink,
+    encode_alarm_line_protocol,
+};
+use common::rules::{AlarmEvent, Severity};
 use common::{Quality, Sink, SourceId, TelemetrySample};
 use std::error::Error;
 use std::fmt;
@@ -57,5 +61,51 @@ fn combined_ec_and_ds18b20_sample_is_written_without_a_live_database() {
     assert_eq!(
         body,
         "aquarium_telemetry,tank_id=tank-1,source=hardware,quality=ok ec_us_cm=450,temp_c=26.187 1770300600000000000"
+    );
+}
+
+#[test]
+fn alarm_line_protocol_contains_context_without_token() {
+    let alarm = AlarmEvent {
+        tank_id: "tank, west".into(),
+        rule_id: "ec.minimum".into(),
+        severity: Severity::Critical,
+        reason: "value \"too low\"".into(),
+        observed_value: Some(42.5),
+        timestamp: OffsetDateTime::from_unix_timestamp(1_770_300_600).unwrap(),
+    };
+    let line = encode_alarm_line_protocol(&alarm).unwrap();
+    assert_eq!(
+        line,
+        "aquarium_alarm,tank_id=tank\\,\\ west,rule_id=ec.minimum,severity=critical reason=\"value \\\"too low\\\"\",observed_value=42.5 1770300600000000000"
+    );
+    assert!(!line.contains("token"));
+}
+
+#[test]
+fn alarm_sink_posts_to_the_existing_write_endpoint() {
+    let transport = FakeTransport {
+        body: Vec::new(),
+        status: 204,
+    };
+    let mut sink = AlarmSink::new(
+        InfluxDbConfig::new("http://127.0.0.1:8086", "org", "bucket", "secret-token"),
+        transport,
+    )
+    .unwrap();
+    sink.write(AlarmEvent {
+        tank_id: "tank-1".into(),
+        rule_id: "temperature.maximum".into(),
+        severity: Severity::Warning,
+        reason: "too warm".into(),
+        observed_value: None,
+        timestamp: OffsetDateTime::from_unix_timestamp(1_770_300_600).unwrap(),
+    })
+    .unwrap();
+    let transport = sink.into_inner();
+    assert!(
+        String::from_utf8(transport.body)
+            .unwrap()
+            .starts_with("aquarium_alarm,tank_id=tank-1")
     );
 }

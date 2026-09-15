@@ -4,7 +4,7 @@ use collector::{
 };
 use collector::{RawFrameLogger, StdinSource, collect_reader_with_raw_log};
 use common::TelemetrySample;
-use common::influxdb::{InfluxDbConfig, InfluxDbSink, StdHttpTransport};
+use common::influxdb::{AlarmSink, InfluxDbConfig, InfluxDbSink, StdHttpTransport};
 use common::rules::{RulesConfig, RulesEngine, Severity, SpikeRule, ThresholdRule};
 use std::env;
 use std::fs::{self, OpenOptions};
@@ -24,26 +24,40 @@ fn main() -> io::Result<()> {
             )
         })?;
     let rules = config.rules()?;
-    let mut alarm_output = config.alarm_output.map(AlarmOutput::open).transpose()?;
+    let mut alarm_output = config
+        .alarm_output
+        .clone()
+        .map(AlarmOutput::open)
+        .transpose()?;
 
-    if let Some(device) = config.device {
-        let transport = SerialTransport::open(&device).map_err(|error| {
+    if let Some(ref device) = config.device {
+        let transport = SerialTransport::open(device).map_err(|error| {
             io::Error::new(
                 error.kind(),
                 format!("open serial device {}: {error}", device.display()),
             )
         })?;
         let mut source = EzoEcSource::new(transport);
-        let mut temperature_source =
-            Ds18b20Source::from_path(config.temperature_path.expect("validated temperature path"));
-        let mut sink = match config.influx {
+        let mut temperature_source = Ds18b20Source::from_path(
+            config
+                .temperature_path
+                .clone()
+                .expect("validated temperature path"),
+        );
+        let mut sink = match config.influx.as_ref() {
             Some(influx) => {
                 let token = read_token_file(&influx.token_file)?;
                 TelemetrySink::Influx(
                     InfluxDbSink::new(
-                        InfluxDbConfig::new(influx.url, influx.organization, influx.bucket, token),
+                        InfluxDbConfig::new(
+                            influx.url.clone(),
+                            influx.organization.clone(),
+                            influx.bucket.clone(),
+                            token,
+                        ),
                         StdHttpTransport,
                     )
+                    .and_then(|sink| sink.with_batch_size(config.influx_batch_size))
                     .map_err(|error| {
                         io::Error::new(io::ErrorKind::InvalidInput, error.to_string())
                     })?,
@@ -52,7 +66,11 @@ fn main() -> io::Result<()> {
             None => TelemetrySink::Ndjson(NdjsonSink::new(BufWriter::new(io::stdout()))),
         };
         let mut raw_logger = collector::RawFrameLogger::new(BufWriter::new(&raw_file));
-        let mut runtime = RuleRuntime::new(rules, alarm_output.take());
+        let mut runtime = RuleRuntime::new(
+            rules,
+            alarm_output.take(),
+            build_alarm_sink(&config, config.influx_alarm_output)?,
+        );
         loop {
             let ec_frame = match source.read_frame() {
                 Ok(frame) => frame,
@@ -93,18 +111,26 @@ fn main() -> io::Result<()> {
             };
             let sample = combine_samples(ec, temperature);
             runtime.process(sample, &mut sink)?;
-            sink.flush()?;
+            if matches!(&sink, TelemetrySink::Ndjson(_)) {
+                sink.flush()?;
+            }
             std::thread::sleep(config.interval);
         }
     } else if config.influx.is_some() || rules.is_some() {
-        let sink = match config.influx {
+        let sink = match config.influx.as_ref() {
             Some(influx) => {
                 let token = read_token_file(&influx.token_file)?;
                 TelemetrySink::Influx(
                     InfluxDbSink::new(
-                        InfluxDbConfig::new(influx.url, influx.organization, influx.bucket, token),
+                        InfluxDbConfig::new(
+                            influx.url.clone(),
+                            influx.organization.clone(),
+                            influx.bucket.clone(),
+                            token,
+                        ),
                         StdHttpTransport,
                     )
+                    .and_then(|sink| sink.with_batch_size(config.influx_batch_size))
                     .map_err(|error| {
                         io::Error::new(io::ErrorKind::InvalidInput, error.to_string())
                     })?,
@@ -117,7 +143,11 @@ fn main() -> io::Result<()> {
             raw_file,
             sink,
             config.tank_id.as_deref().unwrap_or("stdin-demo"),
-            RuleRuntime::new(rules, alarm_output),
+            RuleRuntime::new(
+                rules,
+                alarm_output,
+                build_alarm_sink(&config, config.influx_alarm_output)?,
+            ),
         )
         .map(|_| ())
     } else {
@@ -160,14 +190,20 @@ struct RuleRuntime {
     engine: Option<RulesEngine>,
     previous: Option<TelemetrySample>,
     alarm_output: Option<AlarmOutput>,
+    alarm_sink: Option<AlarmSink<StdHttpTransport>>,
 }
 
 impl RuleRuntime {
-    fn new(engine: Option<RulesEngine>, alarm_output: Option<AlarmOutput>) -> Self {
+    fn new(
+        engine: Option<RulesEngine>,
+        alarm_output: Option<AlarmOutput>,
+        alarm_sink: Option<AlarmSink<StdHttpTransport>>,
+    ) -> Self {
         Self {
             engine,
             previous: None,
             alarm_output,
+            alarm_sink,
         }
     }
 
@@ -182,6 +218,13 @@ impl RuleRuntime {
                 output.write_all(&alarms)?;
                 output.flush()?;
             }
+            if let Some(output) = &mut self.alarm_sink {
+                for alarm in alarms {
+                    output
+                        .write(alarm)
+                        .map_err(|error| io::Error::other(format!("alarm sink failed: {error}")))?;
+                }
+            }
         }
         sink.write(sample.clone())
             .map_err(|error| io::Error::other(format!("collector sink failed: {error}")))?;
@@ -192,6 +235,11 @@ impl RuleRuntime {
     fn flush(&mut self) -> io::Result<()> {
         if let Some(output) = &mut self.alarm_output {
             output.flush()?;
+        }
+        if let Some(output) = &mut self.alarm_sink {
+            output
+                .flush()
+                .map_err(|error| io::Error::other(format!("alarm sink flush failed: {error}")))?;
         }
         Ok(())
     }
@@ -254,6 +302,8 @@ struct Config {
     interval: std::time::Duration,
     influx: Option<InfluxConfig>,
     alarm_output: Option<String>,
+    influx_alarm_output: bool,
+    influx_batch_size: usize,
     ec_min: Option<f32>,
     ec_max: Option<f32>,
     ec_severity: Option<Severity>,
@@ -288,6 +338,8 @@ impl Config {
         let mut influx_bucket = None;
         let mut influx_token_file = None;
         let mut alarm_output = None;
+        let mut influx_alarm_output = false;
+        let mut influx_batch_size = 1;
         let mut ec_min = None;
         let mut ec_max = None;
         let mut ec_severity = None;
@@ -300,6 +352,10 @@ impl Config {
         let mut spike_relative = None;
         let mut spike_severity = None;
         while let Some(argument) = args.next() {
+            if argument == "--influx-alarm-output" {
+                influx_alarm_output = true;
+                continue;
+            }
             let value = args
                 .next()
                 .ok_or_else(|| invalid_arguments(&format!("{argument} requires a value")))?;
@@ -318,6 +374,11 @@ impl Config {
                 "--influx-bucket" => influx_bucket = Some(value),
                 "--influx-token-file" => influx_token_file = Some(PathBuf::from(value)),
                 "--alarm-output" => alarm_output = Some(value),
+                "--influx-batch-size" => {
+                    influx_batch_size = parse_positive(&value, "--influx-batch-size")?
+                        .try_into()
+                        .map_err(|_| invalid_arguments("--influx-batch-size is too large"))?
+                }
                 "--ec-min" => ec_min = Some(parse_float(&value, "--ec-min")?),
                 "--ec-max" => ec_max = Some(parse_float(&value, "--ec-max")?),
                 "--ec-severity" => ec_severity = Some(parse_severity(&value)?),
@@ -381,6 +442,11 @@ impl Config {
                 "--influx-url, --influx-organization, --influx-bucket, and --influx-token-file must be provided together",
             ));
         }
+        if influx_alarm_output && influx_url.is_none() {
+            return Err(invalid_arguments(
+                "--influx-alarm-output requires the complete InfluxDB configuration",
+            ));
+        }
         Ok(Self {
             raw_log,
             tank_id,
@@ -394,6 +460,8 @@ impl Config {
                 token_file: influx_token_file.expect("validated token file"),
             }),
             alarm_output,
+            influx_alarm_output,
+            influx_batch_size,
             ec_min,
             ec_max,
             ec_severity,
@@ -449,9 +517,9 @@ impl Config {
         if !active {
             return Ok(None);
         }
-        if self.alarm_output.is_none() {
+        if self.alarm_output.is_none() && !self.influx_alarm_output {
             return Err(invalid_arguments(
-                "rule options require --alarm-output PATH|stderr",
+                "rule options require --alarm-output PATH|stderr or --influx-alarm-output",
             ));
         }
         Ok(Some(RulesEngine::new(RulesConfig {
@@ -530,6 +598,32 @@ fn read_token_file(path: &std::path::Path) -> io::Result<String> {
     Ok(token.to_owned())
 }
 
+fn build_alarm_sink(
+    config: &Config,
+    enabled: bool,
+) -> io::Result<Option<AlarmSink<StdHttpTransport>>> {
+    if !enabled {
+        return Ok(None);
+    }
+    let influx = config
+        .influx
+        .as_ref()
+        .expect("validated InfluxDB alarm configuration");
+    let token = read_token_file(&influx.token_file)?;
+    AlarmSink::new(
+        InfluxDbConfig::new(
+            influx.url.clone(),
+            influx.organization.clone(),
+            influx.bucket.clone(),
+            token,
+        ),
+        StdHttpTransport,
+    )
+    .and_then(|sink| sink.with_batch_size(config.influx_batch_size))
+    .map(Some)
+    .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error.to_string()))
+}
+
 enum TelemetrySink<W> {
     Influx(InfluxDbSink<StdHttpTransport>),
     Ndjson(NdjsonSink<W>),
@@ -551,7 +645,9 @@ impl<W: Write> Sink for TelemetrySink<W> {
 impl<W: Write> TelemetrySink<W> {
     fn flush(&mut self) -> io::Result<()> {
         match self {
-            Self::Influx(_) => Ok(()),
+            Self::Influx(sink) => sink
+                .flush()
+                .map_err(|error| io::Error::other(format!("InfluxDB flush failed: {error}"))),
             Self::Ndjson(sink) => sink.flush(),
         }
     }
@@ -578,6 +674,8 @@ mod tests {
                 interval: std::time::Duration::ZERO,
                 influx: None,
                 alarm_output: None,
+                influx_alarm_output: false,
+                influx_batch_size: 1,
                 ec_min: None,
                 ec_max: None,
                 ec_severity: None,
@@ -703,6 +801,31 @@ mod tests {
     }
 
     #[test]
+    fn parses_influx_batch_and_opt_in_alarm_output() {
+        let config = Config::from_args(
+            [
+                "--raw-log",
+                "frames.ndjson",
+                "--influx-url",
+                "http://127.0.0.1:8086",
+                "--influx-organization",
+                "aquarium",
+                "--influx-bucket",
+                "telemetry",
+                "--influx-token-file",
+                "/run/keys/influx-token",
+                "--influx-batch-size",
+                "10",
+                "--influx-alarm-output",
+            ]
+            .map(str::to_owned),
+        )
+        .expect("valid configuration");
+        assert_eq!(config.influx_batch_size, 10);
+        assert!(config.influx_alarm_output);
+    }
+
+    #[test]
     fn parses_explicit_rule_configuration() {
         let config = Config::from_args(
             [
@@ -761,6 +884,7 @@ mod tests {
                 spike: None,
             })),
             Some(AlarmOutput::open(path.to_string_lossy().into_owned()).expect("alarm file")),
+            None,
         );
         let sample = TelemetrySample {
             tank_id: "tank-1".into(),
