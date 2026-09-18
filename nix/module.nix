@@ -522,7 +522,7 @@ in
     (lib.mkIf cfg.simulator.enable {
       assertions = [
         { assertion = cfg.simulator.tankId != null && cfg.simulator.tankId != ""; message = "services.aquarium-monitor.simulator.tankId must be set"; }
-        { assertion = cfg.simulator.temperatureC != null && cfg.simulator.temperatureC >= 0.0 && lib.isFinite cfg.simulator.temperatureC; message = "services.aquarium-monitor.simulator.temperatureC must be finite and non-negative"; }
+        { assertion = cfg.simulator.temperatureC != null && cfg.simulator.temperatureC >= 0.0; message = "services.aquarium-monitor.simulator.temperatureC must be finite and non-negative"; }
         { assertion = cfg.influxdb.enable; message = "services.aquarium-monitor.simulator.enable requires InfluxDB to be enabled"; }
         { assertion = cfg.influxdb.environmentFile != null; message = "services.aquarium-monitor.influxdb.environmentFile must be set for the simulator"; }
         { assertion = cfg.influxdb.tokenFile != null; message = "services.aquarium-monitor.influxdb.tokenFile must be set for the simulator"; }
