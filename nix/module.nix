@@ -417,7 +417,10 @@ in
         extraOptions = [ "--pull=missing" "--restart=on-failure" ]
           ++ healthCheckOptions cfg.influxdb.healthCheck;
       };
-      systemd.tmpfiles.rules = [ "d '${cfg.influxdb.dataDir}' 0750 1000 1000 -" ];
+      systemd.tmpfiles.rules = [
+        "d '${cfg.influxdb.dataDir}' 0750 1000 1000 -"
+        "Z '${cfg.influxdb.dataDir}' 0750 1000 1000 -"
+      ];
     })
     (lib.mkIf cfg.grafana.enable {
       assertions = lib.optionals cfg.grafana.provisioning.enable [
@@ -450,7 +453,10 @@ in
         extraOptions = [ "--pull=missing" "--restart=on-failure" ]
           ++ healthCheckOptions cfg.grafana.healthCheck;
       };
-      systemd.tmpfiles.rules = [ "d '${cfg.grafana.dataDir}' 0750 472 472 -" ];
+      systemd.tmpfiles.rules = [
+        "d '${cfg.grafana.dataDir}' 0750 472 472 -"
+        "Z '${cfg.grafana.dataDir}' 0750 472 472 -"
+      ];
     })
     (lib.mkIf cfg.grafana.dashboard.enable {
       assertions = [
