@@ -436,6 +436,8 @@ in
           podman network exists ${podmanNetwork} || podman network create ${podmanNetwork}
         '';
       };
+      systemd.services.podman-influxdb.requires = [ "aquarium-monitor-podman-network.service" ];
+      systemd.services.podman-influxdb.after = [ "aquarium-monitor-podman-network.service" ];
     })
     (lib.mkIf cfg.grafana.enable {
       assertions = lib.optionals cfg.grafana.provisioning.enable [
@@ -473,6 +475,8 @@ in
         "d '${cfg.grafana.dataDir}' 0750 472 472 -"
         "Z '${cfg.grafana.dataDir}' 0750 472 472 -"
       ];
+      systemd.services.podman-grafana.requires = [ "aquarium-monitor-podman-network.service" ];
+      systemd.services.podman-grafana.after = [ "aquarium-monitor-podman-network.service" ];
     })
     (lib.mkIf cfg.grafana.dashboard.enable {
       assertions = [
