@@ -3,6 +3,7 @@
 let
   cfg = config.services.aquarium-monitor;
   collectorService = "aquarium-monitor.service";
+  podmanNetwork = "aquarium-monitor";
   grafanaDatasourceProvisioning = pkgs.writeText "aquarium-monitor-grafana-datasource.yml" ''
     apiVersion: 1
 
@@ -11,7 +12,7 @@ let
         uid: aquarium-influxdb
         type: influxdb
         access: proxy
-        url: http://host.containers.internal:${toString cfg.influxdb.port}
+         url: http://influxdb:${toString cfg.influxdb.port}
         jsonData:
           version: Flux
           organization: ${cfg.influxdb.organization}
@@ -408,6 +409,7 @@ in
       ];
       virtualisation.oci-containers.containers.influxdb = {
         image = cfg.influxdb.image;
+        networks = [ podmanNetwork ];
         ports = [ "127.0.0.1:${toString cfg.influxdb.port}:8086" ];
         volumes = [ "${cfg.influxdb.dataDir}:/var/lib/influxdb2" ];
         environment = lib.optionalAttrs (cfg.influxdb.retention != null) {
@@ -421,6 +423,19 @@ in
         "d '${cfg.influxdb.dataDir}' 0750 1000 1000 -"
         "Z '${cfg.influxdb.dataDir}' 0750 1000 1000 -"
       ];
+      systemd.services.aquarium-monitor-podman-network = {
+        description = "Aquarium Monitor Podman network";
+        wantedBy = [ "multi-user.target" ];
+        before = [ "podman-influxdb.service" "podman-grafana.service" ];
+        path = [ pkgs.podman ];
+        serviceConfig = {
+          Type = "oneshot";
+          RemainAfterExit = true;
+        };
+        script = ''
+          podman network exists ${podmanNetwork} || podman network create ${podmanNetwork}
+        '';
+      };
     })
     (lib.mkIf cfg.grafana.enable {
       assertions = lib.optionals cfg.grafana.provisioning.enable [
@@ -440,6 +455,7 @@ in
       ];
       virtualisation.oci-containers.containers.grafana = {
         image = cfg.grafana.image;
+        networks = [ podmanNetwork ];
          ports = [ "${cfg.grafana.listenAddress}:${toString cfg.grafana.port}:3000" ];
         volumes = [ "${cfg.grafana.dataDir}:/var/lib/grafana" ]
           ++ lib.optional cfg.grafana.provisioning.enable
