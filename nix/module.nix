@@ -11,7 +11,7 @@ let
       - name: Aquarium InfluxDB
         uid: aquarium-influxdb
         type: influxdb
-        access: proxy
+         access: proxy
          url: "http://influxdb:${toString cfg.influxdb.port}"
         jsonData:
           version: Flux
