@@ -37,6 +37,9 @@
             rustPkgs = pkgs.rustBuilder.makePackageSet {
               rustChannel = "nightly";
               rustVersion = "latest";
+              # cargo2nix links crate artifacts between isolated builds, so
+              # retain the full metadata inside each .rlib on nightly.
+              cargoUnstableFlags = [ "embed-metadata=yes" ];
               packageFun = import ./Cargo.nix;
             };
           in rec 
